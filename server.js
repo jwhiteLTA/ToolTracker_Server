@@ -187,6 +187,34 @@ app.use(session({
     },
 }));
 
+// Separate, long-lived session for the read-only Dashboard app -- a distinct cookie name
+// ('dash.sid' vs the admin session's 'tt.sid' above) and its own session() instance, mounted
+// only on /api/dashboard*, so it never shares a cookie or a req.session shape with the admin
+// session and can't grant or inherit admin access either way. Deliberately no idle timeout
+// (the admin panel's 5-minute one is enforced client-side in admin.js, not here) and a long
+// maxAge, since this is meant to run unattended on a shop-floor display and stay logged in --
+// see requireDashboardAuth below for how routes check req.session.dashboardUserId specifically,
+// never the admin session's req.session.user.
+app.use('/api/dashboard', session({
+    store: new pgSession({ pool, createTableIfMissing: true, tableName: 'session' }),
+    secret: process.env.SESSION_SECRET,
+    name: 'dash.sid',
+    resave: false,
+    saveUninitialized: false,
+    rolling: true,
+    cookie: {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        maxAge: 90 * 24 * 60 * 60 * 1000, // 90 days
+    },
+}));
+
+function requireDashboardAuth(req, res, next) {
+    if (!req.session.dashboardUserId) return res.status(401).json({ error: 'Not logged in.' });
+    next();
+}
+
 // IP-based brute-force throttle for every PIN-checking endpoint. Deliberately generous
 // (the kiosk is a single shared walk-up device -- many legitimate people share one IP all
 // day) since the precise, per-badge defense is the DB-backed lockout below; this just
@@ -1443,6 +1471,73 @@ app.get('/api/session', async (req, res) => {
 app.post('/api/logout', (req, res) => {
     req.session.destroy((err) => {
         res.clearCookie('tt.sid');
+        if (err) return res.status(500).json({ error: 'Logout failed.' });
+        res.json({ success: true });
+    });
+});
+
+// ==========================================
+// DASHBOARD AUTH (separate, long-lived session -- see the dashboardSession middleware and
+// requireDashboardAuth near the top of this file)
+// ==========================================
+// Identical credential check to POST /api/login above (same lockout/bcrypt rules), but sets
+// req.session.dashboardUserId on the dashboard's own session instead of req.session.user on
+// the admin one -- the two are never interchangeable.
+app.post('/api/dashboard/auth/login', async (req, res) => {
+    const { login_id, pin } = req.body;
+    try {
+        const query = `
+            SELECT user_id, badge_id, full_name, role, is_active, pin_hash
+            FROM users WHERE (badge_id ILIKE $1 OR username ILIKE $1)
+        `;
+        const result = await pool.query(query, [login_id]);
+        if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid Credentials.' });
+        const candidate = result.rows[0];
+
+        const lockout = await checkLockout(candidate.badge_id);
+        if (lockout.locked) return res.status(423).json(LOCKOUT_RESPONSE);
+
+        if (!(await bcrypt.compare(pin, candidate.pin_hash))) {
+            await recordFailedPinAttempt(candidate.badge_id);
+            return res.status(401).json({ error: 'Invalid Credentials.' });
+        }
+        if (!candidate.is_active) return res.status(403).json({ error: 'Profile deactivated.' });
+
+        await resetFailedPinAttempts(candidate.badge_id);
+        req.session.dashboardUserId = candidate.user_id;
+        res.json({ success: true, user: { full_name: candidate.full_name, role: candidate.role } });
+    } catch (err) {
+        res.status(500).json({ error: 'Server error during login.' });
+    }
+});
+
+// Login-card counterpart, same reasoning as POST /api/login/qr -- not subject to
+// checkLockout/failed_pin_attempts since login_token is a 128-bit random value, not a guessable PIN.
+app.post('/api/dashboard/auth/login-qr', async (req, res) => {
+    const { token } = req.body;
+    try {
+        const result = await pool.query(
+            'SELECT user_id, full_name, role, is_active FROM users WHERE login_token = $1',
+            [token]
+        );
+        if (result.rows.length === 0 || !result.rows[0].is_active) {
+            return res.status(401).json({ error: 'Login card not recognized.' });
+        }
+        req.session.dashboardUserId = result.rows[0].user_id;
+        res.json({ success: true, user: { full_name: result.rows[0].full_name, role: result.rows[0].role } });
+    } catch (err) {
+        res.status(500).json({ error: 'Server error during login.' });
+    }
+});
+
+app.get('/api/dashboard/auth/me', (req, res) => {
+    if (!req.session.dashboardUserId) return res.status(401).json({ error: 'Not logged in.' });
+    res.json({ success: true });
+});
+
+app.post('/api/dashboard/auth/logout', (req, res) => {
+    req.session.destroy((err) => {
+        res.clearCookie('dash.sid');
         if (err) return res.status(500).json({ error: 'Logout failed.' });
         res.json({ success: true });
     });
@@ -5630,7 +5725,7 @@ app.delete('/api/tool-groups/:id', requireFetchHeader, requireRole(3), async (re
 // 8. DASHBOARD & REPORTS
 // ==========================================
 // Fetch summary stats plus lists of checked-out, flagged, and calibration-tracked tools. No role check.
-app.get('/api/dashboard', async (req, res) => {
+app.get('/api/dashboard', requireDashboardAuth, async (req, res) => {
     try {
         const totalTools = await pool.query("SELECT COUNT(*) FROM tools WHERE status != 'Retired'");
         const totalOut = await pool.query("SELECT COUNT(*) FROM tools WHERE status = 'Out'");
@@ -5686,7 +5781,7 @@ app.get('/api/dashboard', async (req, res) => {
 // endpoints (dashboard.html itself has no auth wall -- it's a read-only global view). Days
 // with zero activity are still included (zero-filled client-side, not here) so the chart's
 // x-axis stays evenly spaced; this endpoint only returns days that actually have rows.
-app.get('/api/dashboard/activity-trend', async (req, res) => {
+app.get('/api/dashboard/activity-trend', requireDashboardAuth, async (req, res) => {
     const days = Math.min(90, Math.max(1, parseInt(req.query.days, 10) || 30));
     try {
         const result = await pool.query(
@@ -5720,7 +5815,7 @@ app.get('/api/dashboard/activity-trend', async (req, res) => {
 // computed against the default 04:00/14:00 boundary, not its real one -- a known, accepted
 // limitation (the live checkout gate and the admin "today's status" view ARE fully per-schedule
 // correct; only this historical trend chart isn't), not something this change attempts to fix.
-app.get('/api/dashboard/audit-compliance-trend', async (req, res) => {
+app.get('/api/dashboard/audit-compliance-trend', requireDashboardAuth, async (req, res) => {
     const windowCount = Math.min(60, Math.max(1, parseInt(req.query.windows, 10) || 14));
     try {
         const deptsRes = await pool.query('SELECT dept_id, name FROM departments ORDER BY name');

@@ -22,9 +22,49 @@
 
     <a href="index.html" class="persistent-home no-print"><span class="icon" data-icon="home"></span> Main Hub</a>
 
+    <!-- Auth wall: long-lived dashboard-only session (see requireDashboardAuth/dash.sid in
+         server.js), fully separate from the admin panel's session -- this login never grants
+         admin or kiosk access. Shown by default; checkDashboardAuth() in dashboard.js hides it
+         and reveals #dash-app on an existing valid session or a successful login. No idle
+         timeout by design -- meant to stay signed in on an unattended shop-floor display. -->
+    <div id="dash-auth-wall" style="min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px;">
+        <div class="card" style="width:100%; max-width:380px;">
+            <h2 style="margin-bottom:8px; text-align:center;">LTA Dashboard</h2>
+            <p style="color:var(--muted); font-size:12px; text-align:center; margin-bottom:16px;">Scan your login card, or sign in manually below</p>
+
+            <div class="form-group">
+                <label class="form-label">Login Card</label>
+                <input class="form-input" type="password" autocomplete="off" id="dash-login-card-input" placeholder="Scan with a USB scanner..." autofocus
+                       onkeydown="if(event.key==='Enter' && this.value.trim()){handleDashQrAuth(this.value.trim());this.value='';}">
+            </div>
+
+            <div style="display:flex; align-items:center; gap:10px; margin-bottom:16px; color:var(--muted); font-size:11px;">
+                <div style="flex:1; height:1px; background:var(--border);"></div>
+                <div>OR SIGN IN MANUALLY</div>
+                <div style="flex:1; height:1px; background:var(--border);"></div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Identifier (Badge or Username)</label>
+                <input class="form-input" autocomplete="off" id="dash-login-id-input" placeholder="e.g. jdoe or ADMIN-01">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Secure PIN</label>
+                <input class="form-input" type="password" autocomplete="off" inputmode="numeric" pattern="[0-9]*" id="dash-pin-input" placeholder="••••" onkeydown="if(event.key==='Enter')loginDashboard()">
+            </div>
+            <button class="btn" onclick="loginDashboard()">Sign In →</button>
+            <div id="dash-login-error" style="color:var(--red); font-size:12px; text-align:center; margin-top:10px;"></div>
+        </div>
+    </div>
+
+    <div id="dash-app" style="display:none;">
+
     <!-- Sidebar navigation tree: global overview link + dynamically-populated storage directory tree -->
     <div class="sidebar no-print">
-        <div class="sidebar-header">LTA Telemetry</div>
+        <div class="sidebar-header" style="display:flex; align-items:center; justify-content:space-between;">
+            LTA Telemetry
+            <span onclick="logoutDashboard()" title="Sign out" style="cursor:pointer; color:var(--muted); font-size:11px; text-decoration:underline;">Sign Out</span>
+        </div>
 
         <div class="nav-item active" id="nav-global" onclick="loadGlobalDashboard()"><span class="icon" data-icon="globe"></span> Global Overview</div>
         <div class="nav-item" id="nav-cal-cockpit" onclick="loadCalCockpit()"><span class="icon" data-icon="lock"></span> Calibration Cockpit</div>
@@ -286,6 +326,8 @@
         </div>
 
     </div>
+
+    </div><!-- /#dash-app -->
 
     <!-- Read-only tool detail modal: opened by clicking any tool row in the global or per-location tables. Permanently view-only -- no edit/delete controls. -->
     <div id="tool-detail-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.8); z-index: 9999; justify-content: center; align-items: center; padding: 20px;" onclick="if (event.target === this) closeToolDetailModal();">

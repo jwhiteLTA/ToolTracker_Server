@@ -16,13 +16,86 @@ let globalStorageBoxes = [];
 let globalStorageDrawers = [];
 
 // ==========================================
+// 1b. AUTH (separate, long-lived dashboard-only session -- see requireDashboardAuth/dash.sid
+// in server.js; this login never grants admin or kiosk access, and vice versa)
+// ==========================================
+/**
+ * Called once on window load (see bottom of file) instead of bootDashboard() directly.
+ * Checks for an existing valid dashboard session; shows the login wall if there isn't one,
+ * otherwise reveals #dash-app and proceeds exactly as before.
+ */
+async function checkDashboardAuth() {
+    try {
+        const res = await fetch('/api/dashboard/auth/me');
+        if (res.ok) return showDashApp();
+    } catch (err) { /* fall through to login wall */ }
+    document.getElementById('dash-auth-wall').style.display = 'flex';
+    document.getElementById('dash-app').style.display = 'none';
+}
+
+function showDashApp() {
+    document.getElementById('dash-auth-wall').style.display = 'none';
+    document.getElementById('dash-app').style.display = 'block';
+    bootDashboard();
+}
+
+async function loginDashboard() {
+    const loginId = document.getElementById('dash-login-id-input').value.trim();
+    const pin = document.getElementById('dash-pin-input').value.trim();
+    const errorEl = document.getElementById('dash-login-error');
+    errorEl.textContent = '';
+
+    if (!loginId || !pin) { errorEl.textContent = 'Identifier and PIN are required.'; return; }
+
+    try {
+        const res = await fetch('/api/dashboard/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ login_id: loginId, pin })
+        });
+        const data = await res.json();
+        if (!res.ok) { errorEl.textContent = data.error || 'Invalid credentials.'; return; }
+        document.getElementById('dash-login-id-input').value = '';
+        document.getElementById('dash-pin-input').value = '';
+        showDashApp();
+    } catch (err) {
+        errorEl.textContent = 'Server error.';
+    }
+}
+
+async function handleDashQrAuth(token) {
+    const errorEl = document.getElementById('dash-login-error');
+    errorEl.textContent = '';
+    try {
+        const res = await fetch('/api/dashboard/auth/login-qr', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token })
+        });
+        const data = await res.json();
+        if (!res.ok) { errorEl.textContent = data.error || 'Login card not recognized.'; return; }
+        showDashApp();
+    } catch (err) {
+        errorEl.textContent = 'Server error.';
+    }
+}
+
+async function logoutDashboard() {
+    try {
+        await fetch('/api/dashboard/auth/logout', { method: 'POST' });
+    } finally {
+        window.location.reload();
+    }
+}
+
+// ==========================================
 // 2. BOOT SEQUENCE
 // ==========================================
 /**
  * Kicks off the dashboard page: loads the storage tree sidebar, then the
  * global dashboard view, then the shift audit status widget (which keeps itself
- * live afterward -- see loadAuditStatusWidget()). Called once on window load
- * (see bottom of file).
+ * live afterward -- see loadAuditStatusWidget()). Called by showDashApp() once
+ * checkDashboardAuth() confirms a valid session (see bottom of file).
  */
 async function bootDashboard() {
     await fetchStorageTree();
@@ -1156,7 +1229,7 @@ function closeToolDetailModal() { document.getElementById('tool-detail-overlay')
 // 7. PAGE INITIALIZATION TRIGGER
 // ==========================================
 // Initialize on load
-window.onload = bootDashboard;
+window.onload = checkDashboardAuth;
 
 // Keeps the Shift Audit Status widget live on an unattended/all-day display: the
 // countdown ticks every 30s from cached data (no network call), and a full re-fetch every
