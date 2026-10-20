@@ -7,3 +7,5 @@ caddy-for-raspberry-pi/
 Caddyfile
 logs/
 .claude/
+public/uploads/
+postgres_data/
