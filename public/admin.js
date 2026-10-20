@@ -14,6 +14,12 @@ let globalToolsCache = [];
 let globalUsersCache = [];
 let globalToolGroupsCache = [];
 let globalDeptGroupsCache = []; // cross-checkout department groups (migrations/020) -- {group_id, name}
+// Credentials for every brand-new person from the LAST bulk user CSV import (see
+// submitUsersImport()) -- {full_name, username, badge_id, pin} per created row. Read by
+// copyUserImportCredentials()/printUserImportCredentials() so the handout summary survives
+// being generated once and consumed by either action (or both), without re-deriving it from
+// the results table's rendered HTML.
+let globalUserImportCredentials = [];
 // Sub-assemblies (migrations/018) of whichever tool's entity modal is currently open --
 // populated by openEntityModal() from entity.sub_assemblies (already embedded on every
 // GET /api/tools row), so openEditSubAssemblyForm()/deleteSubAssembly() can look a row up by
@@ -233,6 +239,7 @@ function bootstrapAdminUI(user) {
         safeSetDisplay('card-manage-drawers', 'none');
         safeSetDisplay('card-manage-users', 'none');
         safeSetDisplay('card-inventory-import', 'none');
+        safeSetDisplay('card-user-import', 'none');
         safeSetDisplay('card-trace-investigations', 'none');
         safeSetDisplay('card-tool-groups', 'none');
         safeSetDisplay('card-mpc-import', 'none');
@@ -2382,6 +2389,120 @@ async function submitInventoryImport() {
     } finally {
         btn.innerHTML = `${icon('upload')} Import`; btn.disabled = false;
     }
+}
+
+/**
+ * Uploads the file selected in #import-users-csv-file to POST /api/users/import (multipart
+ * field `csv`) and renders the returned per-row report into #user-import-results-container --
+ * same shape/reasoning as submitInventoryImport() above (best-effort, no single pass/fail
+ * result). Additionally splits every 'created' row's `credentials` out into
+ * globalUserImportCredentials and renders them as their own handout-style table
+ * (#user-import-credentials-body) -- the bulk equivalent of showCredentialsModal(), which only
+ * ever shows one person at a time. Refreshes the Manage Accounts table + Company Roster
+ * afterward so new/edited people show up immediately. Gated to currentAdminWeight >= 3
+ * (dept_admin+) by the hidden #card-user-import card, matching the server's requireRole(3) on
+ * this endpoint.
+ */
+async function submitUsersImport() {
+    const fileInput = document.getElementById('import-users-csv-file');
+    const file = fileInput.files[0];
+    if (!file) return alert('⚠️ Choose a CSV file first.');
+
+    const formData = new FormData();
+    formData.append('csv', file);
+
+    const btn = document.getElementById('btn-import-users-csv');
+    btn.innerHTML = `${icon('hourglass')} Importing...`; btn.disabled = true;
+
+    try {
+        const res = await fetch('/api/users/import', { method: 'POST', headers: { 'X-Requested-With': 'ToolTracker' }, body: formData });
+        const data = await res.json();
+        if (!res.ok) { alert('❌ ' + (data.error || 'Import failed.')); return; }
+
+        const { results, summary } = data;
+        document.getElementById('user-import-results-container').style.display = 'block';
+        document.getElementById('user-import-summary').textContent = `${summary.created} created, ${summary.updated} updated, ${summary.errors} error(s).`;
+        document.getElementById('user-import-results-body').innerHTML = results.map(r => {
+            const color = r.result === 'error' ? 'var(--red)' : (r.result === 'created' ? 'var(--green)' : 'var(--accent)');
+            const resultIcon = r.result === 'error' ? icon('circle-x') : icon('circle-check');
+            // Every field here can come straight from an untrusted CSV cell (badge/message are
+            // echoed from the uploaded file, including on a failed row) -- escaped the same way
+            // work_order free text is elsewhere in this file, not trusted just because the import
+            // also required dept_admin+ to run.
+            return `<tr><td>${r.row}</td><td style="font-family: monospace;">${escapeHtmlAttr(r.badge)}</td><td style="color: ${color}; font-weight: bold;">${resultIcon} ${r.result}</td><td>${escapeHtmlAttr(r.message)}</td></tr>`;
+        }).join('');
+
+        globalUserImportCredentials = results.filter(r => r.credentials).map(r => r.credentials);
+        const credSection = document.getElementById('user-import-credentials-section');
+        if (globalUserImportCredentials.length > 0) {
+            credSection.style.display = 'block';
+            // full_name/username are CSV-sourced (username is derived from the CSV's own Email
+            // cell) -- escaped for the same reason as the results table above, right next to a
+            // freshly-generated PIN this time, which makes an unescaped injection here more
+            // valuable to an attacker, not less.
+            document.getElementById('user-import-credentials-body').innerHTML = globalUserImportCredentials.map(c => `
+                <tr><td>${escapeHtmlAttr(c.full_name)}</td><td style="font-family:monospace;">${escapeHtmlAttr(c.badge_id)}</td><td style="font-family:monospace;">${escapeHtmlAttr(c.username)}</td><td style="font-family:monospace; font-weight:bold; color:var(--accent);">${escapeHtmlAttr(c.pin)}</td></tr>
+            `).join('');
+        } else {
+            credSection.style.display = 'none';
+        }
+
+        fileInput.value = '';
+        loadUsers(); loadRosterDirectory();
+    } catch (err) {
+        alert('❌ Network error during import.');
+    } finally {
+        btn.innerHTML = `${icon('upload')} Import`; btn.disabled = false;
+    }
+}
+
+/** Copies every row in globalUserImportCredentials to the clipboard as plain text, one person per line -- same manual-select fallback reasoning as copyCredentialsToClipboard() above (the Clipboard API can silently fail outside a secure context). */
+function copyUserImportCredentials() {
+    if (globalUserImportCredentials.length === 0) return;
+    const text = globalUserImportCredentials.map(c => `${c.full_name}: Badge ${c.badge_id}, Username ${c.username}, PIN ${c.pin}`).join('\n');
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(
+            () => alert('✅ Copied all new credentials to the clipboard.'),
+            () => alert('Could not copy automatically -- select the table above manually instead.')
+        );
+    } else {
+        alert('Could not copy automatically -- select the table above manually instead.');
+    }
+}
+
+/**
+ * Prints globalUserImportCredentials as a standalone handout sheet -- same .printable-area +
+ * window.print() pattern as printUserLoginCard()/openToolboxPrintSheet() above, reusing the
+ * same shared print container rather than adding a second one. No images involved (unlike the
+ * login-card print), so no waitForImages() step is needed before window.print().
+ */
+function printUserImportCredentials() {
+    if (globalUserImportCredentials.length === 0) return;
+    document.getElementById('toolbox-print-sheet-content').innerHTML = `
+        <h3 style="margin-bottom:12px;">New ToolTracker Accounts -- ${new Date().toLocaleDateString()}</h3>
+        <table style="border-collapse:collapse; width:100%;">
+            <thead><tr>
+                <th style="text-align:left; border-bottom:2px solid #000; padding:6px;">Full Name</th>
+                <th style="text-align:left; border-bottom:2px solid #000; padding:6px;">Badge ID</th>
+                <th style="text-align:left; border-bottom:2px solid #000; padding:6px;">Username</th>
+                <th style="text-align:left; border-bottom:2px solid #000; padding:6px;">Temporary PIN</th>
+            </tr></thead>
+            <tbody style="font-family:monospace;">
+                ${globalUserImportCredentials.map(c => `
+                    <tr>
+                        <td style="padding:6px; border-bottom:1px solid #ccc;">${escapeHtmlAttr(c.full_name)}</td>
+                        <td style="padding:6px; border-bottom:1px solid #ccc;">${escapeHtmlAttr(c.badge_id)}</td>
+                        <td style="padding:6px; border-bottom:1px solid #ccc;">${escapeHtmlAttr(c.username)}</td>
+                        <td style="padding:6px; border-bottom:1px solid #ccc; font-weight:bold;">${escapeHtmlAttr(c.pin)}</td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>
+        <p style="font-size:11px; color:#777; margin-top:14px;">Relay each PIN to its person directly -- never emailed, never stored in recoverable form.</p>
+    `;
+    const area = document.getElementById('toolbox-print-sheet-area');
+    area.style.display = 'block';
+    window.print();
 }
 
 /**

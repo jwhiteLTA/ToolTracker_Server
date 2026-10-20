@@ -1995,6 +1995,270 @@ app.put('/api/users/me/update', requireFetchHeader, requireRole(1), async (req, 
 });
 
 // ==========================================
+// 3.5 BULK USER IMPORT / EXPORT (CSV)
+// ==========================================
+// Same philosophy as the Tools CSV import (TOOLS_CSV_COLUMNS/POST /api/tools/import further
+// down) -- direct-commit and best-effort, NOT the analyze/review/commit split the Micro
+// Precision calibration importer uses. That split exists there because most rows need a human
+// judgment call (ambiguous matches, which certificate belongs to which row); here, exactly like
+// the tools importer, the match key is exact (Badge ID, or Username if Badge ID is blank) and
+// every other column maps onto validation POST /api/users and PUT /api/users/:badge_id/role
+// already do, so a review screen would have nothing to add.
+//
+// Badge ID is never client-supplied anywhere else in this app -- POST /api/users above always
+// derives it from the target department's prefix_code plus the next sequential number. A
+// brand-new person has no Badge ID yet BY DEFINITION, so (unlike Barcode ID on the tools
+// importer, which the uploader picks themselves) a blank Badge ID/Username here isn't a missing
+// value, it's what marks a row as "this person doesn't exist yet." A non-blank Badge ID (or,
+// failing that, a non-blank Username) must already belong to an active person, or the row is a
+// per-row error -- never a silent create under a CSV-invented badge, which would desync the
+// per-department numbering scheme POST /api/users relies on.
+const USERS_CSV_COLUMNS = ['Badge ID', 'Username', 'Full Name', 'Email', 'Department', 'Role'];
+
+/**
+ * Lenient Role-cell parser for the bulk user import: accepts the DB's own role value
+ * (dept_admin) or the Manage Accounts UI's display label (ROLE_LABELS in admin.js --
+ * "Department Admin"), case/space/dash-insensitive -- this file is far more likely to be
+ * drafted by HR in a spreadsheet than the Tools CSV, which is filled in by shop staff already
+ * fluent in this app's own column jargon. Returns null (not a thrown error) for anything
+ * unrecognized, so the caller can report a per-row error that includes the original text.
+ */
+function parseRoleCell(val) {
+    const normalized = String(val || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+    const resolved = normalized === 'department_admin' ? 'dept_admin' : normalized; // the one label that doesn't already normalize onto its own DB value
+    return ['super_admin', 'dept_admin', 'tool_rep', 'technician'].includes(resolved) ? resolved : null;
+}
+
+// Dedicated memory-storage multer instance, same reasoning/limit as csvUpload below (the file
+// only needs parsing once, never persisted) -- kept separate rather than shared, matching this
+// file's existing one-instance-per-import-feature pattern (csvUpload for tools, calImportUpload
+// for Micro Precision) rather than reaching forward to a const declared later in the file.
+const userImportUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 } });
+
+// Full personnel export: one row per active user, in the exact CSV shape the import below
+// expects back -- the same "export, edit in a spreadsheet, re-import" loop the tools CSV
+// supports. Subordinates only (getRoleWeight(u.role) < req.authUser.weight), same visibility
+// rule GET /api/users already applies -- this never lists a peer/superior account the viewer
+// couldn't act on via import anyway.
+app.get('/api/users/export', requireRole(3), async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT u.badge_id, u.username, u.full_name, u.email, u.role, d.name AS department_name
+            FROM users u LEFT JOIN departments d ON u.dept_id = d.dept_id
+            WHERE u.is_active = true ORDER BY u.full_name ASC
+        `);
+        const rows = result.rows
+            .filter(u => getRoleWeight(u.role) < req.authUser.weight)
+            .map(u => ({
+                'Badge ID': u.badge_id,
+                'Username': u.username || '',
+                'Full Name': u.full_name,
+                'Email': u.email || '',
+                'Department': u.department_name || '',
+                'Role': u.role,
+            }));
+
+        const csv = stringifyCsv(rows, { header: true, columns: USERS_CSV_COLUMNS });
+        const filename = `tooltracker-users-${new Date().toISOString().split('T')[0]}.csv`;
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.send(csv);
+    } catch (err) {
+        console.error('Users Export Error:', err);
+        res.status(500).json({ error: 'Failed to export users.' });
+    }
+});
+
+/**
+ * Bulk user import from the Users CSV format (see USERS_CSV_COLUMNS). Best-effort, not
+ * all-or-nothing, same as POST /api/tools/import -- one bad row is reported and skipped, every
+ * other valid row still goes through, and the full per-row report is returned. Requires
+ * dept_admin+ (getRoleWeight >= 3), matching both the tools importer's own threshold and the
+ * Manage Accounts panel's existing UI gate (card-manage-users in bootstrapAdminUI), which
+ * already hides everything in this panel -- including the single-user Provision New User form
+ * -- below that weight, even though POST /api/users itself only requires requireRole(1).
+ *
+ * SECURITY -- the four requirements this endpoint exists to satisfy, each reusing existing,
+ * already-reviewed logic rather than a new parallel implementation:
+ *
+ * 1. PIN: a brand new person always gets a fresh generatePin() -- the exact same call POST
+ *    /api/users makes -- bcrypt-hashed via hashPin() before it's ever written. There is no CSV
+ *    column for a PIN/password at all, so there's no such input to even ignore. Every generated
+ *    PIN comes back in this response's `credentials` field so the admin panel can render the
+ *    same handout-style summary showCredentialsModal() already shows for one new user, just for
+ *    the whole batch -- never emailed, never written anywhere but pin_hash.
+ * 2. Role cap: a NEW row reuses POST /api/users' own two-step check verbatim -- department
+ *    membership (accessibleDeptIds), then getEffectiveRoleWeight(authUser, deptId) >=
+ *    getRoleWeight(role). An UPDATE row reuses PUT /api/users/:badge_id/role's own two checks
+ *    verbatim -- the requester's home weight must exceed the target's CURRENT role weight, and
+ *    the NEW role can't exceed the requester's own. Neither is new logic, just the same
+ *    comparisons those two existing endpoints already make, applied per row.
+ * 3. Department: resolved by exact name against the departments table, the same lookup-by-name
+ *    the tools importer already uses for its own Department/Toolbox/Drawer columns -- an
+ *    unrecognized name is a per-row error, never a new department and never a silent fallback.
+ * 4. Updating an existing person writes ONLY full_name/dept_id/role -- pin_hash and login_token
+ *    are never part of the UPDATE statement below, full stop. Email/Username are read only to
+ *    MATCH a row to a person (see USERS_CSV_COLUMNS' header comment above) and are never
+ *    written for an existing person; if the cell disagrees with what's already on file, the
+ *    row's result message says so explicitly instead of silently changing it (or silently
+ *    ignoring the typed value without saying anything).
+ *
+ * One consequence of mirroring #2 exactly: nothing outranks an existing super_admin under
+ * PUT /api/users/:badge_id/role's own formula (weight 4 can never exceed weight 4), so a row
+ * matching an existing super_admin always reports a hierarchy error here too, even if only
+ * their Full Name changed -- not a new restriction, the same one that already applies today.
+ */
+app.post('/api/users/import', requireFetchHeader, requireRole(3), userImportUpload.single('csv'), async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'No CSV file provided.' });
+
+    let records;
+    try {
+        records = parseCsv(req.file.buffer, { columns: true, skip_empty_lines: true, trim: true });
+    } catch (err) {
+        return res.status(400).json({ error: 'Could not parse CSV file: ' + err.message });
+    }
+
+    const results = [];
+    let created = 0, updated = 0, errors = 0;
+
+    for (let i = 0; i < records.length; i++) {
+        const row = records[i];
+        const rowNum = i + 2; // +2: 1-indexed, plus the header row itself -- matches the tools importer
+        const badgeCell = (row['Badge ID'] || '').trim();
+        const usernameCell = (row['Username'] || '').trim();
+
+        try {
+            const role = parseRoleCell(row['Role']);
+            if (!role) throw new Error(`Invalid Role "${row['Role']}" -- must be Technician, Tool Rep, Department Admin, or Super Admin.`);
+
+            const full_name = (row['Full Name'] || '').trim();
+            if (!full_name) throw new Error('Full Name is required.');
+
+            // ---- Match this row to an existing active person, if it names one ----
+            let existing = null;
+            if (badgeCell) {
+                // Case-insensitive -- badge IDs are always generated uppercase (see the
+                // prefix.toUpperCase() generation further down), but a hand-retyped/autocorrected
+                // lowercase badge in an HR-edited roster is exactly the messy-casing case this
+                // whole importer is meant to tolerate.
+                const r = await pool.query('SELECT * FROM users WHERE UPPER(badge_id) = UPPER($1) AND is_active = true', [badgeCell]);
+                if (r.rows.length === 0) throw new Error(`No active user with Badge ID "${badgeCell}" -- check for typos, or leave Badge ID and Username blank to create a new person.`);
+                existing = r.rows[0];
+            } else if (usernameCell) {
+                // Case-insensitive -- username is lowercased at creation (POST /api/users), but
+                // PUT /api/users/me/update's own self-service rename doesn't enforce that, so a
+                // case-sensitive match here could reject a real match over nothing but case. That
+                // same looseness means two active accounts can differ only by case (the unique
+                // index is case-sensitive) -- an ambiguous match is a per-row error, never an
+                // unannounced pick of whichever row the query happens to return first.
+                const r = await pool.query('SELECT * FROM users WHERE LOWER(username) = LOWER($1) AND is_active = true', [usernameCell]);
+                if (r.rows.length === 0) throw new Error(`No active user with Username "${usernameCell}" -- check for typos, or leave Badge ID and Username blank to create a new person.`);
+                if (r.rows.length > 1) throw new Error(`Username "${usernameCell}" matches more than one active account (differing only by case) -- use Badge ID instead to disambiguate.`);
+                existing = r.rows[0];
+            }
+
+            // ---- Resolve Department by exact name -- blank is only legal for Super Admin, same rule POST /api/users enforces ----
+            const deptNameCell = (row['Department'] || '').trim();
+            let finalDeptId, deptPrefixCode = null;
+            if (!deptNameCell) {
+                if (role !== 'super_admin') throw new Error('Department is required (only a Super Admin may have none).');
+                finalDeptId = null;
+            } else {
+                const deptRes = await pool.query('SELECT dept_id, prefix_code FROM departments WHERE name = $1', [deptNameCell]);
+                if (deptRes.rows.length === 0) throw new Error(`No department named "${deptNameCell}" -- check for typos, or create it first.`);
+                finalDeptId = deptRes.rows[0].dept_id;
+                deptPrefixCode = deptRes.rows[0].prefix_code;
+            }
+
+            if (existing) {
+                // ================= Update an existing person =================
+                // Same two hierarchy checks as PUT /api/users/:badge_id/role, verbatim.
+                if (req.authUser.weight <= getRoleWeight(existing.role)) {
+                    throw new Error(`Hierarchy violation -- you do not outrank ${existing.full_name}'s current role (${existing.role}).`);
+                }
+                if (getRoleWeight(role) > req.authUser.weight) {
+                    throw new Error(`Cannot set role to "${role}" -- above your own.`);
+                }
+
+                // Require dept_admin-level (weight 3+) standing in the person's CURRENT
+                // department for ANY edit, not just one that moves them -- checked
+                // unconditionally, not only when finalDeptId differs from existing.dept_id. A
+                // CSV row normally echoes the person's existing department back unchanged (that's
+                // what exporting and editing only Role/Full Name looks like), so gating this on
+                // "department actually changed" left every in-place edit/promotion completely
+                // unchecked for department access -- a dept_admin confined to department A could
+                // edit or promote anyone in any other department, as long as they didn't also try
+                // to relocate them. canAccessDept (not raw accessibleDeptIds membership) is the
+                // same weight-aware check the tools importer's own "update" path uses, since mere
+                // membership (e.g. a super_admin-granted technician-level visibility into another
+                // department) was never meant to carry edit rights there.
+                if (!canAccessDept(req.authUser, existing.dept_id, 3)) {
+                    throw new Error(`You do not have department-admin-level access to ${existing.full_name}'s current department -- cannot edit them.`);
+                }
+                if (finalDeptId !== existing.dept_id && !canAccessDept(req.authUser, finalDeptId, 3)) {
+                    throw new Error(`You do not have department-admin-level access to department "${deptNameCell}" to move this person there.`);
+                }
+
+                await pool.query('UPDATE users SET full_name = $1, dept_id = $2, role = $3 WHERE user_id = $4', [full_name, finalDeptId, role, existing.user_id]);
+                updated++;
+
+                // Compared against what's actually on file either way (not just when there's
+                // something on file to compare against) -- a blank-on-file email/username that
+                // the CSV fills in is exactly the case an admin is most likely to assume just got
+                // saved, so it gets the same explicit "not changed" note as a mismatch does,
+                // instead of silently reporting plain "Updated existing user."
+                const notes = [];
+                if (usernameCell && usernameCell.toLowerCase() !== (existing.username || '').toLowerCase()) {
+                    notes.push(`Username cell ("${usernameCell}") doesn't match this person's actual username${existing.username ? ` ("${existing.username}")` : ' (none on file)'} -- not changed; Username is a match key here, not an editable field.`);
+                }
+                const emailCell = (row['Email'] || '').trim();
+                if (emailCell && emailCell.toLowerCase() !== (existing.email || '').toLowerCase()) {
+                    notes.push(`Email cell ("${emailCell}") was not saved${existing.email ? ` -- existing email ("${existing.email}") kept` : ' -- no email on file'}; this import never writes email, PIN, or login-card for an existing person.`);
+                }
+                results.push({ row: rowNum, badge: existing.badge_id, result: 'updated', message: ['Updated existing user.', ...notes].join(' ') });
+
+            } else {
+                // ================= Create a brand-new person =================
+                // Same two-step check as POST /api/users, verbatim.
+                if (req.authUser.role !== 'super_admin' && !req.authUser.accessibleDeptIds.includes(finalDeptId)) {
+                    throw new Error(`You do not have access to department "${deptNameCell}".`);
+                }
+                if (getEffectiveRoleWeight(req.authUser, finalDeptId) < getRoleWeight(role)) {
+                    throw new Error(`Cannot create a "${role}" user -- above your own role.`);
+                }
+
+                const email = (row['Email'] || '').trim();
+                if (!email || !email.includes('@')) throw new Error('A valid Email address is required to create a new person.');
+                const username = email.split('@')[0].toLowerCase();
+
+                // Badge ID generation -- byte-for-byte the same logic as POST /api/users above:
+                // the department's prefix_code plus the next sequential number, or the fixed
+                // "ADMIN-" prefix for a department-less Super Admin.
+                const prefix = finalDeptId ? deptPrefixCode : 'ADMIN-';
+                const maxRes = await pool.query(`SELECT MAX(CAST(NULLIF(regexp_replace(badge_id, '\\D', '', 'g'), '') AS INTEGER)) as max_num FROM users WHERE badge_id LIKE $1`, [`${prefix}%`]);
+                const newBadgeId = prefix + String((maxRes.rows[0].max_num || 0) + 1).padStart(3, '0');
+
+                const newPin = generatePin();
+                await pool.query(
+                    `INSERT INTO users (badge_id, full_name, email, username, dept_id, role, pin_hash) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                    [newBadgeId, full_name, email, username, finalDeptId, role, await hashPin(newPin)]
+                );
+                created++;
+                results.push({
+                    row: rowNum, badge: newBadgeId, result: 'created', message: `Created new user (${username}).`,
+                    credentials: { full_name, username, badge_id: newBadgeId, pin: newPin },
+                });
+            }
+        } catch (err) {
+            errors++;
+            results.push({ row: rowNum, badge: badgeCell || usernameCell || '(new)', result: 'error', message: err.message });
+        }
+    }
+
+    res.json({ success: true, results, summary: { created, updated, errors } });
+});
+
+// ==========================================
 // 4. INFRASTRUCTURE & STORAGE MANAGEMENT
 // ==========================================
 
