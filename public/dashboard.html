@@ -37,7 +37,8 @@
 
             <div class="form-group">
                 <label class="form-label">Login Card</label>
-                <input class="form-input" type="password" autocomplete="off" id="dash-login-card-input" placeholder="Scan with a USB scanner..." autofocus
+                <input class="form-input" type="password" autocomplete="off" inputmode="none" id="dash-login-card-input" placeholder="Scan with a USB scanner..." autofocus
+                       onpointerdown="this.removeAttribute('inputmode')" onblur="this.setAttribute('inputmode','none')"
                        onkeydown="if(event.key==='Enter' && this.value.trim()){handleDashQrAuth(this.value.trim());this.value='';}">
             </div>
 

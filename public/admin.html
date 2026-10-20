@@ -38,7 +38,8 @@
         <div class="form-group">
             <label class="form-label">Login Card</label>
             <div style="display: flex; gap: 8px;">
-                <input class="form-input" type="password" autocomplete="off" id="admin-login-card-input" placeholder="Scan with a USB scanner..." autofocus
+                <input class="form-input" type="password" autocomplete="off" inputmode="none" id="admin-login-card-input" placeholder="Scan with a USB scanner..." autofocus
+                       onpointerdown="this.removeAttribute('inputmode')" onblur="this.setAttribute('inputmode','none')"
                        onkeydown="if(event.key==='Enter' && this.value.trim()){playScanFeedback();handleQrLoginScan(this.value.trim());this.value='';}">
                 <button class="btn-icon" onclick="startQrLoginCamera()"><span class="icon" data-icon="qr-code"></span></button>
             </div>

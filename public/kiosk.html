@@ -95,7 +95,8 @@
                  so a USB-scanner shop PC can just scan with no click first; a typed badge+PIN
                  below remains the full manual fallback. -->
             <div class="form-group" style="display: flex; gap: 8px; align-items: center;">
-                <input class="form-input" type="password" autocomplete="off" id="auth-login-card-input" style="font-size: 18px; padding: 12px; text-align: center;" placeholder="Scan login card..." autofocus
+                <input class="form-input" type="password" autocomplete="off" inputmode="none" id="auth-login-card-input" style="font-size: 18px; padding: 12px; text-align: center;" placeholder="Scan login card..." autofocus
+                       onpointerdown="this.removeAttribute('inputmode')" onblur="this.setAttribute('inputmode','none')"
                        onkeydown="if(event.key==='Enter' && this.value.trim()){playScanFeedback();handleKioskQrAuth(this.value.trim());this.value='';}">
                 <button class="btn-icon" onclick="startAuthQrCameraScanner()" title="Scan Login Card"><span class="icon" data-icon="qr-code"></span></button>
             </div>
@@ -359,7 +360,8 @@
             <p style="font-size: 13px; color: var(--muted); margin-bottom: 20px;">Any other active coworker must enter their PIN, or scan their login card, to confirm this transaction.</p>
 
             <div class="form-group">
-                <input class="form-input" type="password" autocomplete="off" id="override-login-card-input" placeholder="Scan buddy's login card..." style="text-align: center;"
+                <input class="form-input" type="password" autocomplete="off" inputmode="none" id="override-login-card-input" placeholder="Scan buddy's login card..." style="text-align: center;"
+                       onpointerdown="this.removeAttribute('inputmode')" onblur="this.setAttribute('inputmode','none')"
                        onkeydown="if(event.key==='Enter' && this.value.trim()){playScanFeedback();submitTransactionWithOverrideToken(this.value.trim());this.value='';}">
             </div>
 
