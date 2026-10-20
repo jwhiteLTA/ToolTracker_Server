@@ -2,37 +2,57 @@
 
 ToolTracker is LTA's tool check-in / check-out tracking system. It keeps a live record of which tools exist, where they live (department → toolbox → drawer), who has them checked out, whether they're overdue for calibration, and whether they're out for QA calibration. A single Node/Express server exposes a JSON API backed by PostgreSQL and serves a small set of static front-end pages for shop-floor and admin use, installable as a PWA on any phone, tablet, or desktop.
 
+## Contents
+- [Entry Points](#entry-points-public)
+- [Feature Overview](#feature-overview)
+- [Progressive Web App (PWA)](#progressive-web-app-pwa)
+- [Running Locally (PC / Dev)](#running-locally-pc--dev)
+- [Raspberry Pi Deployment](#raspberry-pi-deployment)
+- [Disaster Recovery & Resilience](#disaster-recovery--resilience)
+- [Generating Tool Labels](#generating-tool-labels)
+- [Maintenance](#maintenance)
+- [Troubleshooting](#troubleshooting)
+- [Tech Stack](#tech-stack)
+- [Security Notes](#security-notes)
+- [Future Improvements](#future-improvements)
+
 ## Entry Points (`public/`)
 
 The server serves everything in `public/` as static files. There are four pages, each independently installable as its own app (see [Progressive Web App](#progressive-web-app-pwa) below):
 
 - **`index.html`** — The hub. A simple landing page with links to the other three tools.
 - **`kiosk.html`** — Shop-floor scanning station. A technician identifies themselves with a badge/username **and PIN**, or by scanning a login card (see [Feature Overview](#feature-overview)), then scans tool barcodes (camera or a USB barcode gun) to check tools in or out, run toolbox audits, report a damaged/missing tool, or send a tool to QA for calibration. Every checkout and check-in additionally requires a second person — any other active account, any role — to sign off with their own PIN or login card (a "buddy check"). Meant to run on a shared PC, tablet, or phone at the point of use.
-- **`admin.html`** — Admin portal for managing personnel (users, roles, PINs), inventory infrastructure (departments, toolboxes, drawers, tools), running reports, and seeing which departments still need their mandatory audit for the current shift.
+- **`admin.html`** — Admin portal, organized around six areas on its main hub: **My Account** (your own login), **Personnel** (accounts, roles, PINs), **Departments** (roster, cross-checkout groups, notification settings), **Calibrated Tools** (a sortable, inline-editable list of everything due or overdue for calibration), **Inventory** (the full department → toolbox → drawer → tool structure, plus audit schedules), and **Telemetry & Reports** (work orders, trace-back investigations, the Micro Precision calibration import, the calibration calendar feed, and full data export).
 - **`dashboard.html`** — Read-only telemetry dashboard: counts of tools in/out, flagged tools, upcoming/overdue calibrations, and a click-through detail view for any tool. Each department/toolbox drill-down mirrors the global view's layout, scoped to that location.
 
 ## Feature Overview
 
 Beyond basic check-in/check-out, the app enforces real operational controls, grouped below by area. Deeper rationale for anything security-related lives in [Security Notes](#security-notes) rather than repeated here.
 
+Every account has one role, ranked low to high: `technician` → `tool_rep` → `dept_admin` → `super_admin`. Several features below are gated to a role "and above," written as e.g. `dept_admin+` — meaning a `dept_admin` or a `super_admin`, but not a `tool_rep` or `technician`.
+
 ### Checkout Accountability
 
 - **Dual-PIN sign-off (buddy check)**: every checkout and check-in requires the technician's own PIN plus a second, different active person's PIN — any role, not just supervisors. There is no solo checkout path.
-- **Mandatory shift audits, per-department schedule**: each department must log a toolbox audit at least once per configured audit window before checking tools **out** of it (check-ins are never blocked). Every department defaults to a Morning/Afternoon schedule until a `dept_admin`+ customizes it from the **Audit Schedule** card (Inventory → Master Directory) — any number of windows, starting whenever it wants (e.g. split shifts), each at least 30 minutes apart, up to 12 per department. An audit is one physical-inspection attestation for the whole box (what's currently expected inside it), not a per-tool checklist; a specific tool problem goes through Report Issue instead. See `resolveAuditWindow()`/`getDeptAuditSchedule()` in `server.js`.
+- **Mandatory shift audits, per-department schedule**: each department must log a toolbox audit at least once per configured audit window before checking tools **out** of it (check-ins are never blocked). Every department defaults to a Morning/Afternoon schedule until a `dept_admin`+ customizes it from the **Audit Schedule** card (Inventory → Master Directory) — any number of windows, starting whenever it wants (e.g. split shifts), each at least 30 minutes apart, up to 12 per department. An audit is one physical-inspection attestation for the whole box (what's currently expected inside it), not a per-tool checklist; a specific tool problem goes through Report Issue instead. A department flagged as never holding tools (a pure admin/office department) is exempt from audit tracking entirely — set from the same Department Management screen. *(Implementation: `resolveAuditWindow()` / `getDeptAuditSchedule()` in `server.js`.)*
+- **Cross-checkout department groups**: two or more departments can share a group (e.g. "AVI" and "MX" both under a "Maintenance" group) to become mutually exempt from the normal cross-department buddy-check restriction — anyone in a grouped department can freely check out and sign off on another grouped department's tools. Set up from Department Management. Not to be confused with **Cross-department access grants** below, which is about admin permissions, not day-to-day checkout.
 - **Toolbox single-scan checkout**: scanning a toolbox's own barcode (instead of each tool) checks out everything currently `In` it in one action, run through the exact same per-tool checks as if scanned individually — one bad tool still rolls back the whole batch. Checkout only; rejected at check-in.
-- **Work orders** (optional): tagging a checkout batch with a work order label groups activity in the Reports workspace (tool count, still-out count, Close Out/Reopen) — check-in inherits the label automatically, and ignoring the field entirely changes nothing about how checkout/check-in work.
+- **Work orders** (optional): tagging a checkout batch with a work order label groups activity in the Reports workspace (tool count, still-out count, Close Out/Reopen) — check-in inherits the label automatically, and ignoring the field entirely changes nothing about how checkout/check-in work. An optional Location field sits right next to it at checkout (e.g. a hangar bay or tail number) — same deal: purely descriptive, inherited by the matching check-in, and ignoring it changes nothing.
 - **Scan feedback**: every barcode capture (camera or USB scanner) plays a synthesized beep plus vibration where supported (Android only — iOS Safari has no Vibration API).
 
 ### Calibration & Compliance
 
 - **QA calibration transfers**: reporting a tool "Needs Calibration" starts a two-leg chain of custody — the tool moves to a QA department, QA explicitly accepts/calibrates/returns it, and the home department explicitly accepts the return. Tracked in `tool_transfers`.
-- **Calibration traceability history**: every calibration cycle (provider/lab name + certificate or reference number, not just a new due date) is a permanent row in `calibration_records`, visible as full history on a tool's card. Aimed at the traceability language in 14 CFR § 21.137(f) — see [Security Notes](#security-notes) for what this does and doesn't establish. Can also be logged directly from a tool's card ("+ Log Calibration"), independent of the QA transfer flow, to backfill existing inventory.
+- **Calibration traceability history**: every calibration cycle (provider/lab name + certificate or reference number, not just a new due date) is a permanent row in `calibration_records`, visible as full history on a tool's card. Aimed at the traceability language in 14 CFR § 21.137(f) — see [Security Notes](#security-notes) for what this does and doesn't establish. Can also be logged directly from a tool's card ("+ Log Calibration"), independent of the QA transfer flow, to backfill existing inventory. Fixing a mistake in a logged record (e.g. a mis-typed date) adds a new row that supersedes the old one, with a required reason — the original is never edited or deleted, so the full history stays visible even when it includes a corrected mistake. A certificate can also be logged as "pending" when the vendor hasn't issued the paperwork yet, so the calibration itself doesn't have to wait on them.
+- **Micro Precision calibration import**: upload the vendor's `.xlsx` export plus certificate PDFs, and the importer matches each row to a tool automatically — first by its own Cal ID field, then (for a tool linked by hand during an earlier import) by the tracking reference that import saved, then by serial number. Anything it still can't match goes to a searchable "Needs Linking" picker instead of being silently skipped, and linking one by hand there fills in that tool's Serial Number and Cal ID so a later import can match it on its own. Nothing is written to any tool's calibration history until you explicitly commit the batch. Found in Telemetry & Reports → Calibration Import.
+- **Dedicated Cal ID field**: a tool can carry its own Cal ID — the vendor's tracking number for that specific gage — as a first-class field alongside Serial Number, editable from the tool's card or the Calibrated Tools view below. This is what the Micro Precision importer matches against directly, so a tool with its Cal ID already on file can auto-match on its very first import.
 - **Calibration checkout lock**: checking out a calibrated tool hard-stops on overdue calibration, **no due date on file**, or **no calibration record on file at all** — closing the gap where a tool with a plausible-looking due date but zero real calibration history could still ship. The inventory tree shows which of the three applies instead of a blank/generic date.
 - **Pass/fail + trace-back investigations**: a logged calibration records Pass/Fail. A **Fail** immediately blocks checkout (back-dated due date) and auto-opens a trace-back investigation — one review row per task the tool was used for since its last passing calibration. A supervisor (`dept_admin`+) resolves these from the Reports workspace's Trace-Back Investigations card, and can also open one manually for a suspected defect with no failed calibration behind it.
 - **Tool sub-assemblies**: any tool can have one or more sub-assemblies (e.g. the specific die on a crimper) — each with its own part number and its own independent calibration status, separate from the parent tool's. A sub-assembly that itself needs calibration and is out of cal blocks checkout of the *parent* tool, the same hard-stop as the parent's own expired calibration. Sub-assemblies aren't independently scanned, checked out, or location-tracked — they're attached records managed from the parent tool's card. Distinct from Tool groups below, which is a flat peer grouping with no parent-child relationship.
 - **Calibration certificate photos**: attach a photo of the physical certificate to any calibration record; click the thumbnail to view full-size.
-- **Calibration calendar feed**: a token-gated, read-only `.ics` feed (`GET /api/calendar/calibration.ics`) of every calibrated tool's due date, subscribable from any calendar app. The subscribe URL is `super_admin`-only, in the Reports workspace.
+- **Calibration calendar feed**: a token-gated, read-only `.ics` feed (`GET /api/calendar/calibration.ics`) of every calibrated tool's due date, subscribable from any calendar app. The subscribe URL is `super_admin`-only, in the Reports workspace. Requires `CALENDAR_FEED_TOKEN` to be set in `.env` first — the feed is disabled entirely (not left open) if it's unset.
 - **Calibration Cockpit** (Dashboard app): a read-only, isolated view of calibrated tools only — stat-tile summary drilling into a filterable table, each tool shown with a day-remaining or LOCKED status pill. A second lens over the same data the Global Overview uses; doesn't change tracking or checkout anywhere else.
+- **Calibrated Tools (Admin)**: a second, admin-side view of every tool requiring calibration — one sortable table (name, department, status, serial number, Cal ID, last/due date), with inline editing of Serial Number, Cal ID, Last Cal, and Cal Due right in the row. A sibling to the Calibration Cockpit above, not a replacement for it: the Cockpit is for monitoring at a glance, this is for correcting records on the spot. Found on the admin hub's own Calibrated Tools card.
 - **Duplicate-serial-number guard**: adding/editing a tool or sub-assembly rejects a serial number already registered to a different tool/sub-assembly (case/whitespace-normalized, checked across both), enforced for CSV import too, naming the conflicting item.
 
 ### Inventory Management
@@ -62,39 +82,54 @@ Beyond basic check-in/check-out, the app enforces real operational controls, gro
 - **Account security**: bcrypt-hashed PINs with per-badge brute-force lockout, and a 5-minute idle auto-logout on the admin panel independent of the session cookie's own expiry.
 - **QR login cards**: scan a personal login card (camera or USB scanner) to sign in with no PIN, everywhere a PIN is normally checked — including the kiosk's mandatory buddy sign-off. Badge/PIN remains the explicit backup everywhere. See [Security Notes](#security-notes) for the deliberate single-factor trade-off.
 - **Role management**: a `dept_admin`+ can promote/demote any subordinate up to and including their own level, never higher.
-- **Cross-department access grants**: a `super_admin` can grant a `dept_admin` manager access to departments beyond their own home one, treated identically to it everywhere department-scoped access is checked.
+- **Cross-department access grants**: a `super_admin` can grant any user access to a department beyond their own home one, with its own role for that department specifically — e.g. a `dept_admin` at home can be granted only `tool_rep`-level access elsewhere. That granted role is independent of the person's home-department role. Not to be confused with **Cross-checkout department groups** above, which is about who may check out whose tools day-to-day, not admin permissions.
 - **Real HTTPS everywhere**: camera access requires a secure context on every device but `localhost` — see [HTTPS & Remote Access](#https--remote-access-caddy--duckdns) for how this is solved without per-device certificate installs.
 
 ### Reporting & Platform
 
 - **Dashboard charts**: four lightweight, hand-rolled SVG charts on the Global Overview — Tool Status Breakdown, Calibration Compliance, a 30-day activity trend, and a Shift Audit Compliance trend (the latter pinned to the default audit schedule for every department as a known simplification, not each department's own custom one).
-- **Progressive Web App**: installable home-screen icons for Kiosk/Admin/Dashboard separately, with app-shell caching for brief network resilience (not full offline sync — see [Future Improvements](#future-improvements)).
+- **Notifications (Slack / Email)**: optional outbound alerts — immediately when a tool is reported Missing/Broken/Worn, plus two once-a-day digests (everything still checked out shop-wide; everything due or overdue for calibration soon). Slack and email are independent and both optional (configured via `.env` — see `.env.example`); each department can opt out of each alert type individually from its own entry in Department Management.
+- **Automated activity logs**: a background job writes a running per-department log, broken out by hour and by day, of who currently has what tool and since when — separate from the permanent `audit_logs` database table. See [Maintenance](#maintenance) for where these files live and how long they're kept.
+
+## Progressive Web App (PWA)
+
+Each of the four pages has its own web app manifest (`manifest-index.json`, `manifest-kiosk.json`, `manifest-admin.json`, `manifest-dashboard.json`), so installing "from" a given page creates a home-screen icon that opens straight to that page:
+
+- **iOS Safari**: open the page → Share button → "Add to Home Screen."
+- **Android Chrome / Desktop Chrome/Edge**: open the page → browser menu → "Install app" (or an install icon in the address bar).
+
+`sw.js` (registered on every page via `sw-register.js`) caches the app's own static files for resilience against brief network drops, but is deliberately **network-first**: it always tries the real server first so code/bug fixes show up immediately when online, only falling back to the cached copy if the network request genuinely fails. It never caches `/api/*` calls — live data always comes from the real server or fails honestly.
 
 ## Running Locally (PC / Dev)
 
-The **Raspberry Pi is the only real deployment** — see [Raspberry Pi Migration](#raspberry-pi-migration) below. Running locally on a PC is for writing and testing code changes *before* deploying them (via `npm run deploy`, see [Deploying changes to the Pi](#deploying-changes-to-the-pi)); it's never meant to serve real traffic to real devices, so there's no HTTPS/Caddy/domain step here at all — plain `http://localhost:3000` is enough, since browsers already treat literal `localhost` as a secure context (camera access works fine for local testing without any certificate).
+The **Raspberry Pi is the only real deployment** — see [Raspberry Pi Deployment](#raspberry-pi-deployment) below. Running locally on a PC is for writing and testing code changes *before* deploying them (via `npm run deploy`, see [Deploying changes to the Pi](#deploying-changes-to-the-pi)); it's never meant to serve real traffic to real devices, so there's no HTTPS/Caddy/domain step here at all — plain `http://localhost:3000` is enough, since browsers already treat literal `localhost` as a secure context (camera access works fine for local testing without any certificate).
 
 1. **Configure environment variables:**
    ```
    cp .env.example .env
    ```
-   Then fill in `.env`: generate a `SESSION_SECRET` with the command in `.env.example`'s comment, and set `DB_PASSWORD` (any value for a fresh database — see the next step). Leave `NODE_ENV` and `BASE_STORAGE_PATH` unset for local dev. `.env` is git-ignored; never commit real values, and never reuse the Pi's values here.
+   Then fill in `.env`: generate a `SESSION_SECRET` with the command in `.env.example`'s comment, and set `DB_PASSWORD` (any value for a fresh database — see the next step). Leave `NODE_ENV` and `BASE_STORAGE_PATH` unset for local dev. (`CALENDAR_FEED_TOKEN` is optional, only needed for the calibration calendar feed — see [Feature Overview](#feature-overview).) `.env` is git-ignored; never commit real values, and never reuse the Pi's values here.
 
 2. **Start the database:**
    ```
-   docker-compose up
+   docker compose up
    ```
-   This brings up a PostgreSQL container (`db`, exposed on `5432`) using the `DB_PASSWORD` from `.env`. (Metabase used to run alongside it here but was removed — it was sharing this same database for its own internal metadata, which filled it with 150+ unrelated tables, and nobody was using it.)
+   (Older Docker installs use the hyphenated `docker-compose` instead — same command either way. This README says "docker compose"; substitute the hyphenated form if that's what `docker compose version` vs `docker-compose --version` tells you that you have.)
+
+   This brings up a PostgreSQL container (`db`, exposed on `5432`) using the `DB_PASSWORD` from `.env`.
 
 3. **First time only — create the schema:**
+   Run every migration file in `migrations/`, in order (they're numbered for exactly this reason — there are nearly 30 now, each adding one piece of schema):
    ```
-   docker exec -i tooltracker_server-db-1 psql -U tooladmin -d tooltracker < migrations/000_initial_schema.sql
-   docker exec -i tooltracker_server-db-1 psql -U tooladmin -d tooltracker < migrations/001_beta_feedback.sql
-   docker exec -i tooltracker_server-db-1 psql -U tooladmin -d tooltracker < migrations/002_pin_hashing.sql
+   for f in migrations/*.sql; do
+     docker exec -i tooltracker_server-db-1 psql -U tooladmin -d tooltracker < "$f"
+   done
+   ```
+   (Run this in Git Bash on Windows — it's a bash loop.) Then run the PIN-hash backfill once, before starting the server:
+   ```
    node scripts/backfill-pin-hashes.js
-   docker exec -i tooltracker_server-db-1 psql -U tooladmin -d tooltracker < migrations/003_scoped_unique_identifiers.sql
    ```
-   `000` is the full base schema (all 6 core tables). `001` adds `tool_transfers` and `tools.serial_number`. `002` adds the `pin_hash`/lockout columns and a `role` CHECK constraint — the backfill script must run immediately after it and before starting a `server.js` that reads `pin_hash` (see [Security Notes](#security-notes)). `003` scopes `badge_id`/`username`/`email` uniqueness to active users only, so deactivating someone frees their identifiers for reuse without needing a hard delete. All four SQL files are safe to re-run (`IF NOT EXISTS`/`DROP ... IF EXISTS` throughout); the backfill script is also safe to re-run (it only touches rows where `pin_hash` is still `NULL`).
+   The backfill script is always safe to re-run on its own, any time (it only touches accounts that don't already have a hash). Most migration files guard themselves the same way (`IF NOT EXISTS` / `DROP ... IF EXISTS`), so re-running the whole folder against a database that already has some of them applied is generally harmless — though a few of the older files will print an "already exists" error for the one thing they already created. That's expected, not a sign anything broke; the loop just keeps going to the next file.
 
 4. **Start the API and static server:**
    ```
@@ -104,67 +139,7 @@ The **Raspberry Pi is the only real deployment** — see [Raspberry Pi Migration
 
 5. **Open the app:** `http://localhost:3000/`.
 
-## HTTPS & Remote Access (Caddy + DuckDNS)
-
-This entire section describes infrastructure that lives **only on the Pi**, set up once during [Raspberry Pi Migration](#raspberry-pi-migration). It's documented here as reference for how it works and how to redo it (new Pi, lost `Caddyfile`, etc.) — it is not a step to run on a dev PC.
-
-Browsers only allow camera access (`getUserMedia`) on HTTPS, or the special-cased `localhost`. A self-signed certificate doesn't solve this cleanly — every single device (every phone, every tablet) would need that certificate manually installed and trusted, which doesn't scale past one or two test devices, and iOS Safari in particular won't grant camera access off a self-signed cert even after you click through the warning.
-
-The actual fix: a **real, publicly-trusted certificate** (free, via Let's Encrypt) for a DNS name that happens to point at the Pi's **local** IP address. This works because:
-- DNS resolution happens over the public internet, but the actual connection stays entirely on the local network — nothing needs to be reachable from outside. There is no port-forwarding and no public exposure anywhere in this setup.
-- Let's Encrypt can verify domain ownership via a DNS TXT record (the "DNS-01 challenge"), which doesn't require the server to be internet-facing at all.
-- Once issued, the certificate is trusted by every browser/OS on the planet automatically — zero per-device setup, ever.
-
-### One-time setup (already done — this is how it was set up, for reference)
-
-1. Create a free subdomain at [duckdns.org](https://www.duckdns.org) (sign in with GitHub/Google/etc — no new password). Note the domain name and the account token shown at the top of the page.
-2. Point that DuckDNS domain's IP field at the Pi's **local LAN IP** (not its public IP — DuckDNS will auto-fill your public IP by default, which is wrong for this purpose. Get the real local IP via `hostname -I` on the Pi).
-3. Use the pre-built `caddy-for-raspberry-pi/caddy-linux-arm64` binary (already has the DuckDNS plugin built in — no download needed; only re-fetch it if this ARM64 binary is ever lost, via `curl -sL -o caddy "https://caddyserver.com/api/download?os=linux&arch=arm64&p=github.com/caddy-dns/duckdns"`).
-4. Copy `Caddyfile.example` to `Caddyfile` and fill in your actual DuckDNS domain and token (this file is gitignored — it holds a secret, never commit it):
-   ```
-   your-subdomain.duckdns.org {
-       tls {
-           dns duckdns YOUR_DUCKDNS_TOKEN_HERE
-       }
-       reverse_proxy localhost:3000
-   }
-   ```
-5. The Caddy binary needs permission to bind to ports 80/443 without running as root: `sudo setcap cap_net_bind_service=+ep caddy-for-raspberry-pi/caddy-linux-arm64` (one-time; this is a Linux capability grant, not something Windows needs).
-6. Run it (or, in production, let `tooltracker-caddy.service` run it — see [Raspberry Pi Migration](#raspberry-pi-migration)) — on first launch it automatically requests and installs the certificate (takes a few seconds) and **renews it automatically forever after**, as long as Caddy keeps running and has occasional internet access (renewal happens well before the ~90-day expiry).
-
-### If the Pi's local IP ever changes
-
-`tooltracker-duckdns-update.timer` (see [Disaster Recovery & Resilience](#disaster-recovery--resilience)) handles this automatically every 5 minutes now, so this is no longer something that needs noticing and fixing by hand. It exists specifically because there's no DHCP reservation for the Pi yet (pending router access) — a real reservation is still the better long-term fix (one less moving part), but the auto-updater means that's no longer urgent.
-
-### Firewall
-
-Raspberry Pi OS has no firewall enabled by default (no `ufw`/`firewalld`), so nothing extra is needed for LAN devices to reach ports 80/443/3000 on the Pi. If a firewall is ever enabled for hardening, allow at least 443 (HTTPS) and optionally 80 (HTTP→HTTPS redirect) — port 3000 never needs to be reachable from other devices, since Caddy reaches the Node app over `localhost` only.
-
-## Progressive Web App (PWA)
-
-Each of the three main pages has its own web app manifest (`manifest-kiosk.json`, `manifest-admin.json`, `manifest-dashboard.json`), so installing "from" a given page creates a home-screen icon that opens straight to that page:
-
-- **iOS Safari**: open the page → Share button → "Add to Home Screen."
-- **Android Chrome / Desktop Chrome/Edge**: open the page → browser menu → "Install app" (or an install icon in the address bar).
-
-`sw.js` (registered on every page via `sw-register.js`) caches the app's own static files for resilience against brief network drops, but is deliberately **network-first**: it always tries the real server first so code/bug fixes show up immediately when online, only falling back to the cached copy if the network request genuinely fails. It never caches `/api/*` calls — live data always comes from the real server or fails honestly.
-
-## Generating Tool Labels
-
-Every tool gets a 10mm Data Matrix label PNG automatically on creation (`generatePngAtSize()` in `scripts/lib/datamatrix.js`), with its human-readable ID and name, viewable and downloadable from its card in the admin panel — generously padded, since this is for on-screen viewing/selection, not precision engraving (see the physical-printing scripts below for that). It regenerates automatically whenever the tool is renamed. Run `npm run backfill-barcode-labels` any time to generate one for a tool still missing it (safe to re-run), or add `-- --all` to rebase every non-retired tool's label from scratch (e.g. after a label-format change) — this overwrites existing files.
-
-For **physical printing/engraving** specifically, two separate, free, offline scripts (using `bwip-js`, no external service) generate Data Matrix barcodes straight from the live `tools` table at an exact, confirmed-scannable physical size (deliberately zero padding, unlike the auto-generated on-screen label above -- padding here would either enlarge the physical label or shrink the code to compensate, neither desirable once a size is confirmed scannable), so printed/engraved codes can never drift out of sync with the database:
-
-```
-npm run generate-labels [target-size-mm]     # one PNG + one SVG per tool, in tool_labels/
-npm run generate-size-test [qr_code]         # one real tool's code at several candidate sizes, for physical scan-testing
-```
-
-- **PNG** files are sized for printing on adhesive labels (300+ DPI, with correct embedded physical-size metadata so "print at 100%" is accurate).
-- **SVG** files are vector, meant for importing into laser engraving software (LightBurn, etc.) at an exact real-world millimeter size.
-- **Before engraving/printing a full batch**, run `generate-size-test` and physically scan each candidate size with the actual kiosk/admin camera under real shop lighting — the achievable minimum size depends heavily on print/engrave contrast and the camera's minimum focus distance, not just math. See the generated `tool_labels/size_test/README.txt` for the test procedure.
-
-## Raspberry Pi Migration
+## Raspberry Pi Deployment
 
 ### Initial Pi setup (blank SD card → reachable over SSH)
 
@@ -191,13 +166,11 @@ Skip this part if the Pi already has an OS on it and you can SSH in.
    ```
    Log out and back in (or `newgrp docker`) for the `docker` group membership to take effect. Confirm both installed correctly: `node -v` and `docker compose version`.
 
-   Also install `fontconfig` and a base font -- Raspberry Pi OS Lite ships neither, so `sharp`'s bundled SVG rasterizer (used to composite the tool-name row onto barcode labels, see `addNameRow()` in `scripts/lib/datamatrix.js`) silently renders blank text instead of erroring: the canvas and background still come out fine, so this is easy to miss without actually opening a generated label image.
+   Also install `fontconfig` and a base font -- Raspberry Pi OS Lite ships neither, so `sharp`'s bundled SVG rasterizer (used to composite the tool-name row onto barcode labels) silently renders blank text instead of erroring: the canvas and background still come out fine, so this is easy to miss without actually opening a generated label image. *(Implementation: `addNameRow()` in `scripts/lib/datamatrix.js`.)*
    ```bash
    sudo apt install -y fontconfig fonts-dejavu-core
    ```
 8. Give the Pi a **static/reserved IP** via a DHCP reservation on the router now, before going further — the DuckDNS setup later assumes this IP never changes.
-
-   > **Note**: a fresh Docker install provides `docker compose` (a subcommand, no hyphen) rather than the older standalone `docker-compose` binary this README otherwise uses interchangeably with it. Both do the same thing; use whichever is actually installed (`docker compose version` vs `docker-compose --version` to check).
 
 `server.js` writes uploaded photos to `public/uploads` and activity logs to `logs/`, both resolved relative to `BASE_STORAGE_PATH` (read from `.env`, see `.env.example`) — defaults to this project's own directory if unset, which is correct for local PC dev. This is a `.env` setting rather than a line of code specifically so `server.js` stays byte-identical on every deployment: a `git pull` on the Pi should never conflict with an environment-specific code edit.
 
@@ -211,7 +184,7 @@ sudo mkdir -p /mnt/external_drive/ToolTracker_Data
 sudo blkid /dev/sda1           # copy the UUID= value
 ```
 
-Add a line like this to `/etc/fstab` (as root, e.g. `sudo nano /etc/fstab`):
+**Add this line** to `/etc/fstab` (as root, e.g. `sudo nano /etc/fstab`):
 ```
 UUID=xxxx-xxxx-xxxx-xxxx  /mnt/external_drive/ToolTracker_Data  ext4  defaults,nofail  0  2
 ```
@@ -224,7 +197,7 @@ The payoff: since `BASE_STORAGE_PATH` points at this fixed path rather than a de
 4. Update the UUID in `/etc/fstab` to the new drive, unmount both, then `sudo mount -a` to bring the new one up at the real path.
 5. `sudo systemctl start tooltracker`. The 16GB (or whatever size) old drive is now free to reuse or retire.
 
-Steps to move to the Pi:
+### Getting the code onto the Pi, installing dependencies, and creating `.env`
 
 1. Get the code onto the Pi via a **read-only GitHub deploy key** scoped to just this repo, rather than copying files by hand or reusing a personal key with broader access:
    - On the Pi: `ssh-keygen -t ed25519 -f ~/.ssh/tooltracker_deploy_key -N ''`
@@ -239,73 +212,118 @@ Steps to move to the Pi:
    - This also sets up the ongoing workflow: commit and `git push` from the PC like normal, then `git pull` on the Pi to update it — no manual file copying, ever again. See the deploy script further down for turning that into one command.
 2. Run `npm install` on the Pi (installs the same dependencies fresh for its architecture — every dependency in `package.json` is pure JS or ships prebuilt ARM64 binaries, no native build step needed).
 3. Create `.env` on the Pi (`cp .env.example .env`, then fill it in) — this is a **separate** file from the dev machine's, with its **own** freshly generated `SESSION_SECRET` (never reuse the dev one). Set `DB_PASSWORD` to match whatever you set up for the Pi's own Postgres container, set `NODE_ENV=production` this time (unlike local dev) so the session cookie requires HTTPS, and set `BASE_STORAGE_PATH` to wherever the external drive is mounted (see above).
-4. Run all four migration files (plus the PIN-hash backfill) against the Pi's own Postgres instance — a fresh database, so this is the "first time only" path in [Running Locally](#running-locally-pc--dev) step 3, not a repeat of anything from the dev machine.
-5. Use the pre-built `caddy-for-raspberry-pi/caddy-linux-arm64` binary (already has the DuckDNS plugin built in — no need to re-download), and grant it permission to bind ports 80/443 without running as root: `sudo setcap cap_net_bind_service=+ep caddy-for-raspberry-pi/caddy-linux-arm64` (a Linux-only step; Windows never needed this).
-6. Copy `Caddyfile` over too (it's git-ignored since it holds the DuckDNS token — copy it manually, or recreate it from `Caddyfile.example` with the same token as the current deployment so the existing DuckDNS domain keeps working).
-7. Update the DuckDNS IP field to the Pi's local IP (give it a DHCP reservation so this never has to change again, once router access allows it).
-8. Set up both processes to survive reboots and crashes via systemd, so a crash or reboot doesn't require someone to manually notice and restart things:
+4. Run every file in `migrations/` against the Pi's own Postgres instance, then the PIN-hash backfill — the same schema-setup step from [Running Locally](#running-locally-pc--dev) above, just pointed at the Pi's database.
 
-   ```ini
-   # /etc/systemd/system/tooltracker.service
-   [Unit]
-   Description=ToolTracker Node server
-   After=network.target postgresql.service
+### HTTPS & Remote Access (Caddy + DuckDNS)
 
-   [Service]
-   WorkingDirectory=/path/to/ToolTracker_Server
-   ExecStart=/usr/bin/node server.js
-   Restart=always
-   RestartSec=5
+This is the infrastructure that makes the Pi reachable securely from any phone or tablet on the shop floor — it's not something a dev PC needs (see [Running Locally](#running-locally-pc--dev) above, which works fine over plain `http://localhost` with no certificate at all). It's written up in enough detail to redo from scratch if it's ever needed again — a new Pi, a lost `Caddyfile`, etc. — not just as a one-time checklist.
 
-   [Install]
-   WantedBy=multi-user.target
+Browsers only allow camera access (`getUserMedia`) on HTTPS, or the special-cased `localhost`. A self-signed certificate doesn't solve this cleanly — every single device (every phone, every tablet) would need that certificate manually installed and trusted, which doesn't scale past one or two test devices, and iOS Safari in particular won't grant camera access off a self-signed cert even after you click through the warning.
+
+The actual fix: a **real, publicly-trusted certificate** (free, via Let's Encrypt) for a DNS name that happens to point at the Pi's **local** IP address. This works because:
+- DNS resolution happens over the public internet, but the actual connection stays entirely on the local network — nothing needs to be reachable from outside. There is no port-forwarding and no public exposure anywhere in this setup.
+- Let's Encrypt can verify domain ownership via a DNS TXT record (the "DNS-01 challenge"), which doesn't require the server to be internet-facing at all.
+- Once issued, the certificate is trusted by every browser/OS on the planet automatically — zero per-device setup, ever.
+
+#### One-time setup (already done — this is how it was set up, for reference)
+
+1. Create a free subdomain at [duckdns.org](https://www.duckdns.org) (sign in with GitHub/Google/etc — no new password). Note the domain name and the account token shown at the top of the page.
+2. Point that DuckDNS domain's IP field at the Pi's **local LAN IP** (not its public IP — DuckDNS will auto-fill your public IP by default, which is wrong for this purpose. Get the real local IP via `hostname -I` on the Pi).
+3. Use the pre-built `caddy-for-raspberry-pi/caddy-linux-arm64` binary (already has the DuckDNS plugin built in — no download needed; only re-fetch it if this ARM64 binary is ever lost, via `curl -sL -o caddy "https://caddyserver.com/api/download?os=linux&arch=arm64&p=github.com/caddy-dns/duckdns"`).
+4. Copy `Caddyfile.example` to `Caddyfile` and fill in your actual DuckDNS domain and token (this file is gitignored — it holds a secret, never commit it):
+
+   **Create this file:**
    ```
-
-   ```ini
-   # /etc/systemd/system/tooltracker-caddy.service
-   [Unit]
-   Description=ToolTracker Caddy reverse proxy
-   After=network.target tooltracker.service
-
-   [Service]
-   WorkingDirectory=/path/to/ToolTracker_Server
-   ExecStart=/path/to/ToolTracker_Server/caddy-for-raspberry-pi/caddy-linux-arm64 run --config Caddyfile
-   Restart=always
-   RestartSec=5
-
-   [Install]
-   WantedBy=multi-user.target
+   your-subdomain.duckdns.org {
+       tls {
+           dns duckdns YOUR_DUCKDNS_TOKEN_HERE
+       }
+       reverse_proxy localhost:3000
+   }
    ```
+   Setting this up again on a **replacement** Pi rather than for the first time? Reuse the same domain and token in the new `Caddyfile` (copy the old one over by hand, or recreate it from `Caddyfile.example` with the same token) instead of creating a fresh DuckDNS domain, so the address everyone already has bookmarked keeps working.
+5. The Caddy binary needs permission to bind to ports 80/443 without running as root: `sudo setcap cap_net_bind_service=+ep caddy-for-raspberry-pi/caddy-linux-arm64` (one-time; this is a Linux capability grant, not something Windows needs).
+6. Run it (or, in production, let `tooltracker-caddy.service` run it — see [Keeping both processes running](#keeping-both-processes-running-systemd-services-for-the-app--caddy) below) — on first launch it automatically requests and installs the certificate (takes a few seconds) and **renews it automatically forever after**, as long as Caddy keeps running and has occasional internet access (renewal happens well before the ~90-day expiry).
 
-   Then `sudo systemctl enable --now tooltracker tooltracker-caddy`. Also give the Postgres container the same treatment (`docker-compose` already restarts `always`, but confirm Docker itself starts on boot: `sudo systemctl enable docker`). No extra systemd config is needed for `.env` — `dotenv` looks for it in the current working directory by default, and `WorkingDirectory` above already points at the project folder where it lives.
+#### If the Pi's local IP ever changes
 
-9. (Optional but recommended) Schedule log pruning (`npm run prune-logs`, see [Maintenance](#maintenance)) to run monthly instead of remembering to do it by hand, via a systemd timer:
+`tooltracker-duckdns-update.timer` (see [Disaster Recovery & Resilience](#disaster-recovery--resilience)) handles this automatically every 5 minutes now, so this is no longer something that needs noticing and fixing by hand. It exists specifically because there's no DHCP reservation for the Pi yet (pending router access) — a real reservation is still the better long-term fix (one less moving part), but the auto-updater means that's no longer urgent.
 
-    ```ini
-    # /etc/systemd/system/tooltracker-prune-logs.service
-    [Unit]
-    Description=ToolTracker log retention cleanup
+#### Firewall
 
-    [Service]
-    Type=oneshot
-    WorkingDirectory=/path/to/ToolTracker_Server
-    ExecStart=/usr/bin/node scripts/prune-old-logs.js
-    ```
+Raspberry Pi OS has no firewall enabled by default (no `ufw`/`firewalld`), so nothing extra is needed for LAN devices to reach ports 80/443/3000 on the Pi. If a firewall is ever enabled for hardening, allow at least 443 (HTTPS) and optionally 80 (HTTP→HTTPS redirect) — port 3000 never needs to be reachable from other devices, since Caddy reaches the Node app over `localhost` only.
 
-    ```ini
-    # /etc/systemd/system/tooltracker-prune-logs.timer
-    [Unit]
-    Description=Run ToolTracker log pruning monthly
+### Keeping both processes running (systemd services for the app + Caddy)
 
-    [Timer]
-    OnCalendar=monthly
-    Persistent=true
+Give the Node app and Caddy their own systemd services, so a crash or reboot doesn't require someone to manually notice and restart things:
 
-    [Install]
-    WantedBy=timers.target
-    ```
+**Create this file:**
+```ini
+# /etc/systemd/system/tooltracker.service
+[Unit]
+Description=ToolTracker Node server
+After=network.target postgresql.service
 
-    `sudo systemctl enable --now tooltracker-prune-logs.timer`. `Persistent=true` means a run that was missed (e.g. the Pi was off when it would have fired) happens shortly after the next boot instead of silently skipping that month.
+[Service]
+WorkingDirectory=/path/to/ToolTracker_Server
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**And this one:**
+```ini
+# /etc/systemd/system/tooltracker-caddy.service
+[Unit]
+Description=ToolTracker Caddy reverse proxy
+After=network.target tooltracker.service
+
+[Service]
+WorkingDirectory=/path/to/ToolTracker_Server
+ExecStart=/path/to/ToolTracker_Server/caddy-for-raspberry-pi/caddy-linux-arm64 run --config Caddyfile
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then `sudo systemctl enable --now tooltracker tooltracker-caddy`. Also give the Postgres container the same treatment (`docker compose` already restarts `always`, but confirm Docker itself starts on boot: `sudo systemctl enable docker`). No extra systemd config is needed for `.env` — `dotenv` looks for it in the current working directory by default, and `WorkingDirectory` above already points at the project folder where it lives.
+
+### (Optional) Scheduled log pruning via systemd timer
+
+Schedule log pruning (`npm run prune-logs`, see [Maintenance](#maintenance)) to run monthly instead of remembering to do it by hand, via a systemd timer:
+
+**Create this file:**
+```ini
+# /etc/systemd/system/tooltracker-prune-logs.service
+[Unit]
+Description=ToolTracker log retention cleanup
+
+[Service]
+Type=oneshot
+WorkingDirectory=/path/to/ToolTracker_Server
+ExecStart=/usr/bin/node scripts/prune-old-logs.js
+```
+
+**And this one:**
+```ini
+# /etc/systemd/system/tooltracker-prune-logs.timer
+[Unit]
+Description=Run ToolTracker log pruning monthly
+
+[Timer]
+OnCalendar=monthly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+`sudo systemctl enable --now tooltracker-prune-logs.timer`. `Persistent=true` means a run that was missed (e.g. the Pi was off when it would have fired) happens shortly after the next boot instead of silently skipping that month.
 
 ### Deploying changes to the Pi
 
@@ -317,7 +335,7 @@ This pushes local commits to GitHub, then pulls them on the Pi and restarts `too
 
 ## Disaster Recovery & Resilience
 
-Three separate, complementary protections, each against a different failure mode:
+Four separate, complementary protections, each against a different failure mode:
 
 ### 1. Database lives on the external drive, not the SD card
 
@@ -335,35 +353,49 @@ Three separate, complementary protections, each against a different failure mode
 Protects against a different failure than #1: losing the *entire* Pi (stolen, destroyed, both drives fail at once), not just the SD card specifically. `scripts/backup-to-drive.sh` dumps the database and uploads it to Google Drive via `rclone`, keeping the most recent 30 backups and pruning older ones. Runs automatically once a day via `tooltracker-backup.timer`. One-time setup (already done for this deployment):
 
 1. Install rclone: `curl https://rclone.org/install.sh | sudo bash`.
-2. `rclone config` → `n` (new remote) → name it `gdrive` → type `drive` → leave `client_id`/`client_secret` blank (see the client-id note below) → scope `3` (`drive.file` — rclone can only see/manage files *it* creates, not your other Drive contents) → leave `service_account_file` blank → no advanced config → confirm continuing with the shared client_id → **no** to "use web browser" (the Pi has none) → it prints a `rclone authorize "drive" "<token>"` command.
-3. Run that exact command on any machine that *does* have a browser (rclone needs to be installed there too, even temporarily) — it opens a Google sign-in/consent page, then prints a config token back.
-4. Paste that token into the Pi's still-open `config_token>` prompt → `n` (not a Shared/Team Drive) → confirm the remote.
-5. Verify: `rclone lsd gdrive:` should succeed with no error (an empty result is expected — nothing's been uploaded yet).
-6. Create the service + timer:
-   ```ini
-   # /etc/systemd/system/tooltracker-backup.service
-   [Unit]
-   Description=ToolTracker off-Pi database backup
+2. Run `rclone config`
+3. `n` — create a new remote
+4. Name it `gdrive`
+5. Storage type: `drive`
+6. `client_id`: leave blank
+7. `client_secret`: leave blank
+8. Scope: `3` (`drive.file` — rclone can only see/manage files it creates, not the rest of your Drive)
+9. `service_account_file`: leave blank
+10. Edit advanced config? No
+11. Use the shared client_id? Yes, continue
+12. Use auto config (web browser)? **No** — the Pi has no browser
+13. rclone prints an `rclone authorize "drive" "<token>"` command — copy it for the next step
+14. Run that exact command on any machine that *does* have a browser (rclone needs to be installed there too, even temporarily) — it opens a Google sign-in/consent page, then prints a config token back.
+15. Paste that token into the Pi's still-open `config_token>` prompt → `n` (not a Shared/Team Drive) → confirm the remote.
+16. Verify: `rclone lsd gdrive:` should succeed with no error (an empty result is expected — nothing's been uploaded yet).
+17. Create the service and timer:
 
-   [Service]
-   Type=oneshot
-   User=tooltracker
-   WorkingDirectory=/home/tooltracker/ToolTracker_Server
-   ExecStart=/bin/bash scripts/backup-to-drive.sh
-   ```
-   ```ini
-   # /etc/systemd/system/tooltracker-backup.timer
-   [Unit]
-   Description=Run ToolTracker database backup daily
+**Create this file:**
+```ini
+# /etc/systemd/system/tooltracker-backup.service
+[Unit]
+Description=ToolTracker off-Pi database backup
 
-   [Timer]
-   OnCalendar=daily
-   Persistent=true
+[Service]
+Type=oneshot
+User=tooltracker
+WorkingDirectory=/home/tooltracker/ToolTracker_Server
+ExecStart=/bin/bash scripts/backup-to-drive.sh
+```
+**And this one:**
+```ini
+# /etc/systemd/system/tooltracker-backup.timer
+[Unit]
+Description=Run ToolTracker database backup daily
 
-   [Install]
-   WantedBy=timers.target
-   ```
-   `sudo systemctl enable --now tooltracker-backup.timer`.
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+`sudo systemctl enable --now tooltracker-backup.timer`.
 
 **The shared client_id warning**: rclone prints a notice that its shared Google Drive `client_id` "is being retired and will stop working during 2026." This was accepted for now to get backups working immediately without a separate Google Cloud project — but it means backups could silently start failing at some point this year. Creating your own `client_id` (a Google Cloud Console project + OAuth credentials, no Workspace admin needed) removes this risk entirely; see [rclone's guide](https://rclone.org/drive/#making-your-own-client-id). Worth revisiting before year-end regardless of whether it's failed yet.
 
@@ -390,33 +422,53 @@ The same script backs the admin panel's "Download All Data" button (Reports work
 Covered in [If the Pi's local IP ever changes](#if-the-pis-local-ip-ever-changes) above — `scripts/update-duckdns-ip.sh` runs every 5 minutes via `tooltracker-duckdns-update.timer`, so a DHCP lease change (no router-level reservation yet) gets corrected automatically instead of silently breaking access for everyone until it's noticed. Setup, if redoing this on a new Pi:
 
 1. Add `DUCKDNS_DOMAIN` (just the subdomain, e.g. `lta-tooltracker`, not the full `.duckdns.org`) and `DUCKDNS_TOKEN` (same value already in the git-ignored `Caddyfile`) to `.env`.
-2. Create the service + timer:
-   ```ini
-   # /etc/systemd/system/tooltracker-duckdns-update.service
-   [Unit]
-   Description=ToolTracker DuckDNS IP updater
+2. Create the service and timer:
 
-   [Service]
-   Type=oneshot
-   User=tooltracker
-   WorkingDirectory=/home/tooltracker/ToolTracker_Server
-   ExecStart=/bin/bash scripts/update-duckdns-ip.sh
-   ```
-   ```ini
-   # /etc/systemd/system/tooltracker-duckdns-update.timer
-   [Unit]
-   Description=Run ToolTracker DuckDNS IP updater every 5 minutes
+**Create this file:**
+```ini
+# /etc/systemd/system/tooltracker-duckdns-update.service
+[Unit]
+Description=ToolTracker DuckDNS IP updater
 
-   [Timer]
-   OnBootSec=1min
-   OnUnitActiveSec=5min
+[Service]
+Type=oneshot
+User=tooltracker
+WorkingDirectory=/home/tooltracker/ToolTracker_Server
+ExecStart=/bin/bash scripts/update-duckdns-ip.sh
+```
+**And this one:**
+```ini
+# /etc/systemd/system/tooltracker-duckdns-update.timer
+[Unit]
+Description=Run ToolTracker DuckDNS IP updater every 5 minutes
 
-   [Install]
-   WantedBy=timers.target
-   ```
-   `sudo systemctl enable --now tooltracker-duckdns-update.timer`.
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+```
+`sudo systemctl enable --now tooltracker-duckdns-update.timer`.
 
 This doesn't cover a genuine internet outage (DNS resolution for a public domain still needs internet the *first* time a device looks it up, even though the actual app traffic is 100% local afterward — see [Feature Overview](#feature-overview)) — only the "Pi's local IP silently changed" failure mode. A real DHCP reservation is still the cleaner permanent fix once router access allows it; this just means that's no longer urgent.
+
+## Generating Tool Labels
+
+Every tool gets a 10mm Data Matrix label PNG automatically on creation, with its human-readable ID and name, viewable and downloadable from its card in the admin panel — generously padded, since this is for on-screen viewing/selection, not precision engraving (see the physical-printing scripts below for that). It regenerates automatically whenever the tool is renamed. *(Implementation: `generatePngAtSize()` in `scripts/lib/datamatrix.js`.)* Run `npm run backfill-barcode-labels` any time to generate one for a tool still missing it (safe to re-run), or add `-- --all` to rebase every non-retired tool's label from scratch (e.g. after a label-format change) — this overwrites existing files.
+
+For **physical printing/engraving** specifically, two separate, free, offline scripts (using `bwip-js`, no external service) generate Data Matrix barcodes straight from the live `tools` table at an exact, confirmed-scannable physical size (deliberately zero padding, unlike the auto-generated on-screen label above -- padding here would either enlarge the physical label or shrink the code to compensate, neither desirable once a size is confirmed scannable), so printed/engraved codes can never drift out of sync with the database:
+
+```
+npm run generate-labels [target-size-mm]     # one PNG + one SVG per tool, in tool_labels/
+npm run generate-size-test [qr_code]         # one real tool's code at several candidate sizes, for physical scan-testing
+```
+
+- **PNG** files are sized for printing on adhesive labels (300+ DPI, with correct embedded physical-size metadata so "print at 100%" is accurate).
+- **SVG** files are vector, meant for importing into laser engraving software (LightBurn, etc.) at an exact real-world millimeter size.
+- **Before engraving/printing a full batch**, run `generate-size-test` and physically scan each candidate size with the actual kiosk/admin camera under real shop lighting — the achievable minimum size depends heavily on print/engrave contrast and the camera's minimum focus distance, not just math. See the generated `tool_labels/size_test/README.txt` for the test procedure.
+
+Two more one-off scripts live in `scripts/`: `generate-pwa-icons.js` regenerates the home-screen/favicon PNGs from `public/icons/icon-source.svg` — re-run only if that source artwork changes. `cleanup-unused-barcode-variants.js` was a one-time cleanup after an earlier label-format simplification (6 barcode variants per tool down to 1) — already run, kept only for reference.
 
 ## Maintenance
 
@@ -430,7 +482,7 @@ This doesn't cover a genuine internet outage (DNS resolution for a public domain
 - **Certificate renewal**: fully automatic, no action needed — `tooltracker-caddy.service` just needs to keep running, which systemd (`Restart=always`) already guarantees.
 - **Logs**: `logs/hourly/<DEPT>/` and `logs/daily/<DEPT>/` grow daily and are gitignored (not committed) — but the actual bytes involved are small even over years (terse text lines, not binary data), so this is about intentional retention policy more than real disk pressure. `npm run prune-logs` deletes anything older than the retention window set at the top of `scripts/prune-old-logs.js` (2 years by default); pass `--dry-run` to preview what it would delete without touching anything. Runs automatically on the Pi via `tooltracker-prune-logs.timer` (monthly).
 - **Photo storage**: uploaded photos (`public/uploads/`) are automatically resized (max 1600px) and re-compressed to JPEG on upload, and the previous file is deleted whenever a photo is replaced or its entity is deleted (see `deletePhotoFile()` in `server.js`) — so growth tracks the number of *distinct* photos actually taken, not every re-upload or replacement.
-- **Regenerating tool labels**: re-run `npm run generate-labels` any time tools are added — see [Generating Tool Labels](#generating-tool-labels).
+- **Regenerating tool labels**: re-run `npm run generate-labels` any time tools are added — see [Generating Tool Labels](#generating-tool-labels) above.
 
 ## Troubleshooting
 
@@ -443,14 +495,16 @@ This doesn't cover a genuine internet outage (DNS resolution for a public domain
 ## Tech Stack
 
 - **Express** — HTTP API and static file serving
-- **PostgreSQL** via **pg** — primary datastore (departments, users, toolboxes, drawers, tools, audit_logs, tool_transfers)
+- **PostgreSQL** via **pg** — primary datastore for every department, user, tool, transaction, and calibration record the app tracks. The authoritative schema is the numbered files in `migrations/` (nearly 30 now) — not reproduced here, since a hand-kept table list is exactly the kind of thing that goes stale.
 - **bcrypt** — PIN hashing
 - **express-session** + **connect-pg-simple** — Postgres-backed admin session cookies (survive a server restart; no separate session store to run)
 - **express-rate-limit** — IP-based brute-force throttling on every PIN-checking endpoint
 - **helmet** — HTTP security headers, including a locked-down Content-Security-Policy
 - **multer** — handles multipart photo uploads
+- **nodemailer** — SMTP email transport for the notification digests (see Feature Overview → Notifications).
 - **sharp** — image processing for uploaded photos; also used to rasterize PWA icons
 - **bwip-js** — Data Matrix barcode generation for tool labels
+- **exceljs** — parses the Micro Precision vendor .xlsx export for the calibration import feature.
 - **csv-parse** / **csv-stringify** — bulk inventory CSV import/export
 - **html5-qrcode** (vendored, front-end) — camera-based barcode scanning in the browser. Used to load from unpkg.com at request time; now vendored as `public/html5-qrcode.min.js` (copied from the `html5-qrcode` npm package) so scanning doesn't silently break with an "Html5Qrcode is not defined" error on a device with no internet access or an unreachable CDN — the same reasoning as vendoring the icon set below.
 - **Lucide icons** (vendored, front-end) — the app's flat/monochrome icon set. `public/icons.js` holds the full `ICONS` map plus `icon(name)` (for template-literal-built HTML) and `hydrateIcons()` (for `<span class="icon" data-icon="name">` in static HTML) — add a new icon there, not as a new emoji.
@@ -459,11 +513,12 @@ This doesn't cover a genuine internet outage (DNS resolution for a public domain
 
 ## Security Notes
 
+- **Known gap (dated):** a secondary IP-based rate limiter (`authLimiter`) is temporarily disabled (2026-09-11) — its window was triggering during ordinary shared-kiosk use (many people, one IP, across a shift); see the comment above its definition in `server.js` to re-enable it at a higher threshold.
 - **Credentials**: live in `.env` (see `.env.example`), read by both `server.js` and `docker-compose.yml` — nothing hardcoded in source control. `SESSION_SECRET`/`DB_PASSWORD` are fatal-if-missing on startup rather than silently falling back to an insecure default.
 - **PINs are bcrypt-hashed** (`users.pin_hash`), checked via `bcrypt.compare()` everywhere. The legacy plaintext `pin` column still exists in the schema but nothing reads or writes it anymore — kept temporarily for a burn-in period before a future migration drops it (see [Future Improvements](#future-improvements)).
-- **Brute-force lockout**: a per-badge, DB-backed lockout (`failed_pin_attempts`/`locked_until`) is the real defense and is always active, regardless of source IP. A secondary IP-based rate limiter (`authLimiter`) is **temporarily disabled** (2026-09-11) — its window was triggering during ordinary shared-kiosk use (many people, one IP, across a shift); see the comment above its definition in `server.js` to re-enable it at a higher threshold.
+- **Brute-force lockout**: a per-badge, DB-backed lockout (`failed_pin_attempts`/`locked_until`) is the real defense and is always active, regardless of source IP.
 - **Admin authorization**: `requireRole(minWeight)` re-checks the requester's role against the database on every single request, never a cached session snapshot — a deactivated or demoted admin loses access immediately. Role changes are capped at the acting admin's own weight (a `dept_admin` can never create/promote a `super_admin`). A `X-Requested-With` header is required on every mutating request as lightweight CSRF defense. The kiosk stays deliberately sessionless — badge+PIN proves identity fresh per transaction.
-- **Cross-department access is grant-only, not peer-to-peer**: only a `super_admin` can grant a `dept_admin` extra departments — a `dept_admin` can never grant another `dept_admin` access, which would otherwise let peers bypass the hierarchy rule.
+- **Cross-department access is grant-only, not peer-to-peer**: only a `super_admin` can grant extra-department access, to any user — a `dept_admin` can never grant it to someone else, which would otherwise let peers bypass the hierarchy rule.
 - **HTTP hardening**: `helmet` with a locked-down Content-Security-Policy, plus explicit CORS configuration.
 - **No email delivery, by design**: new-user and PIN-reset credentials are always shown directly to the admin in a handout modal, to be relayed in person.
 - **On FAA/regulatory compliance**: this app is built to *support* good tool-control and calibration-traceability practice, targeting the traceability language in 14 CFR § 21.137(f). It is **not** a certification of compliance — that depends on the organization's own approved procedures (e.g. a Repair Station or Quality Manual) as accepted by the relevant FAA office, not on what a tool happens to log.
