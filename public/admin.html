@@ -167,13 +167,17 @@
                     <div class="card" id="card-user-import">
                         <h3 style="margin-bottom: 8px;">Bulk Import / Update Users from CSV</h3>
                         <p style="font-size: 12px; color: var(--muted); margin-bottom: 16px;">
-                            CSV columns: Badge ID, Username, Full Name, Email, Department, Role. Badge ID or Username is the match key -- download the current roster below, edit it, and re-upload to update people (name/department/role only; PINs and login cards are never touched). Leave both blank on a row to create someone new -- a fresh random PIN is generated and shown below, exactly like Provision New User above; the CSV itself can never set a PIN. Department must already exist (see Department Management) and Role can never exceed your own.
+                            CSV columns: Badge ID, Username, Full Name, Email, Department, Role. Badge ID or Username is the match key -- download the current roster below, edit it, and re-upload to update people (name/department/role only; PINs and login cards are never touched). Leave both blank on a row to create someone new. Department and Role are optional in the file -- supply them to pre-fill a suggestion, or leave either blank and pick it yourself per person below. Nothing is saved until you review and commit: a fresh random PIN is generated for each new person only at that point, exactly like Provision New User above; the CSV itself can never set a PIN, and Role can never exceed your own.
                         </p>
                         <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
                             <button class="btn btn-secondary" style="width: auto;" onclick="window.location.href='/api/users/export'"><span class="icon" data-icon="download"></span> Download Current Users (CSV)</button>
                             <input type="file" id="import-users-csv-file" accept=".csv" class="form-input" style="max-width: 320px;">
-                            <button class="btn btn-primary" style="width: auto;" id="btn-import-users-csv" onclick="submitUsersImport()"><span class="icon" data-icon="upload"></span> Import</button>
+                            <button class="btn btn-primary" style="width: auto;" id="btn-import-users-csv" onclick="analyzeUsersImport()"><span class="icon" data-icon="upload"></span> Analyze</button>
                         </div>
+                        <!-- Review screen (renderUserImportReview() in admin.js) -- one row per
+                             analyzeUsersImport() proposal, nothing written to the database until
+                             Commit Selected (commitUsersImport()) is clicked. -->
+                        <div id="user-import-review" style="display:none; margin-top:16px;"></div>
                         <div id="user-import-results-container" style="margin-top: 16px; display: none;">
                             <div id="user-import-summary" style="font-weight: 700; margin-bottom: 8px;"></div>
                             <div class="table-responsive-wrapper" style="max-height: 300px; overflow-y: auto;">

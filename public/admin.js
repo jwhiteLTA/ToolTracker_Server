@@ -14,12 +14,20 @@ let globalToolsCache = [];
 let globalUsersCache = [];
 let globalToolGroupsCache = [];
 let globalDeptGroupsCache = []; // cross-checkout department groups (migrations/020) -- {group_id, name}
-// Credentials for every brand-new person from the LAST bulk user CSV import (see
-// submitUsersImport()) -- {full_name, username, badge_id, pin} per created row. Read by
+// Credentials for every brand-new person from the LAST bulk user CSV import commit (see
+// commitUsersImport()) -- {full_name, username, badge_id, pin} per created row. Read by
 // copyUserImportCredentials()/printUserImportCredentials() so the handout summary survives
 // being generated once and consumed by either action (or both), without re-deriving it from
 // the results table's rendered HTML.
 let globalUserImportCredentials = [];
+// Last response from POST /api/users/import/analyze (the bulk user import's review-screen
+// proposal -- see that route's own doc comment in server.js for the full shape), re-read by
+// commitUsersImport() at commit time. Analogous to mpcAnalysisResult for the Micro Precision
+// calibration importer further down, except there's no separate manual-binding map here: every
+// row's checkbox/Department/Role selects already live directly in the DOM (ids keyed by row
+// number), so commitUsersImport() reads them straight from there -- the same "DOM is the source
+// of truth" reasoning commitMpcImport() itself uses.
+let userImportAnalysis = null;
 // Sub-assemblies (migrations/018) of whichever tool's entity modal is currently open --
 // populated by openEntityModal() from entity.sub_assemblies (already embedded on every
 // GET /api/tools row), so openEditSubAssemblyForm()/deleteSubAssembly() can look a row up by
@@ -2392,18 +2400,13 @@ async function submitInventoryImport() {
 }
 
 /**
- * Uploads the file selected in #import-users-csv-file to POST /api/users/import (multipart
- * field `csv`) and renders the returned per-row report into #user-import-results-container --
- * same shape/reasoning as submitInventoryImport() above (best-effort, no single pass/fail
- * result). Additionally splits every 'created' row's `credentials` out into
- * globalUserImportCredentials and renders them as their own handout-style table
- * (#user-import-credentials-body) -- the bulk equivalent of showCredentialsModal(), which only
- * ever shows one person at a time. Refreshes the Manage Accounts table + Company Roster
- * afterward so new/edited people show up immediately. Gated to currentAdminWeight >= 3
- * (dept_admin+) by the hidden #card-user-import card, matching the server's requireRole(3) on
- * this endpoint.
+ * Uploads the file selected in #import-users-csv-file to POST /api/users/import/analyze
+ * (multipart field `csv`) -- writes nothing to the database -- and renders the returned
+ * proposal as a review screen (renderUserImportReview()) instead of a results table. Gated to
+ * currentAdminWeight >= 3 (dept_admin+) by the hidden #card-user-import card, matching the
+ * server's requireRole(3) on this endpoint.
  */
-async function submitUsersImport() {
+async function analyzeUsersImport() {
     const fileInput = document.getElementById('import-users-csv-file');
     const file = fileInput.files[0];
     if (!file) return alert('⚠️ Choose a CSV file first.');
@@ -2412,47 +2415,241 @@ async function submitUsersImport() {
     formData.append('csv', file);
 
     const btn = document.getElementById('btn-import-users-csv');
-    btn.innerHTML = `${icon('hourglass')} Importing...`; btn.disabled = true;
+    btn.innerHTML = `${icon('hourglass')} Analyzing...`; btn.disabled = true;
 
     try {
-        const res = await fetch('/api/users/import', { method: 'POST', headers: { 'X-Requested-With': 'ToolTracker' }, body: formData });
+        const res = await fetch('/api/users/import/analyze', { method: 'POST', headers: { 'X-Requested-With': 'ToolTracker' }, body: formData });
+        const data = await res.json();
+        if (!res.ok) { alert('❌ ' + (data.error || 'Analyze failed.')); return; }
+
+        userImportAnalysis = data;
+        // Don't carry a stale commit-results/credentials panel from a previous round into a
+        // fresh review -- same reasoning as toggleBatchMoveMode()'s own resultsEl reset.
+        document.getElementById('user-import-results-container').style.display = 'none';
+        renderUserImportReview();
+    } catch (err) {
+        alert('❌ Network error during analyze.');
+    } finally {
+        btn.innerHTML = `${icon('upload')} Analyze`; btn.disabled = false;
+    }
+}
+
+/**
+ * <option> list for a bulk-user-import review row's Department <select>, built from the real
+ * department list analyzeUsersImport() returned (userImportAnalysis.departments) rather than
+ * free text. A blank leading placeholder is always first -- selected unless selectedDeptId
+ * resolves to a real department in the list -- so an unresolved department stays visibly
+ * unselected instead of silently defaulting to whichever one happens to render first. Leaving it
+ * blank is only valid for a Super Admin row (enforced in commitUsersImport() below and again,
+ * authoritatively, server-side by POST /api/users/import/commit).
+ */
+function userImportDeptOptions(selectedDeptId) {
+    const opts = (userImportAnalysis.departments || []).map(d =>
+        `<option value="${d.dept_id}" ${String(d.dept_id) === String(selectedDeptId) ? 'selected' : ''}>${d.name}</option>`
+    ).join('');
+    return `<option value="" ${selectedDeptId ? '' : 'selected'}>-- Select Department --</option>${opts}`;
+}
+
+/**
+ * <option> list for a bulk-user-import review row's Role <select> -- reuses roleOptionsUpTo()
+ * (the same helper the personnel entity modal's own role dropdown already uses), so a row here
+ * can never offer a promotion above the acting admin's own level either. Same "blank unless
+ * resolved" placeholder convention as userImportDeptOptions() above.
+ */
+function userImportRoleOptions(selectedRole) {
+    return `<option value="" ${selectedRole ? '' : 'selected'}>-- Select Role --</option>${roleOptionsUpTo(currentAdminWeight, selectedRole)}`;
+}
+
+/**
+ * Renders one review-screen row for a bulk-user-import proposal entry: a default-checked
+ * checkbox, the person's Full Name/Email (escaped -- both are CSV free text, same trust level as
+ * the old direct-commit importer's own results table), an UPDATE/NEW badge, their current
+ * department/role when this is an update, any advisory notes analyzeUsersImport() attached (also
+ * escaped -- see escapeHtmlAttr()'s own header comment), and the Department/Role <select>s
+ * pre-filled from the CSV's own suggestion if it supplied one, else (for an update) the person's
+ * current value, else left blank for James to choose.
+ */
+function userImportRowHtml(r) {
+    const presetDeptId = r.csv_dept_id || r.current_dept_id || '';
+    const presetRole = r.csv_role || r.current_role || '';
+    const actionBadge = r.action === 'update'
+        ? `<span style="font-size:10px; font-weight:bold; padding:1px 6px; border-radius:8px; background:rgba(255,255,255,0.08); color:var(--accent);">UPDATE</span>`
+        : `<span style="font-size:10px; font-weight:bold; padding:1px 6px; border-radius:8px; background:rgba(34,197,94,0.15); color:var(--green);">NEW</span>`;
+    const identLine = r.action === 'update'
+        ? ` <span style="font-family:monospace; font-size:11px; color:var(--muted);">${escapeHtmlAttr(r.badge_id)}${r.username ? ` / ${escapeHtmlAttr(r.username)}` : ''}</span>`
+        : '';
+    const currentLine = r.action === 'update'
+        ? `<div style="font-size:11px; color:var(--muted);">Currently: ${r.current_dept_name ? escapeHtmlAttr(r.current_dept_name) : '(no department)'} -- ${ROLE_LABELS[r.current_role] || r.current_role}</div>`
+        : '';
+    const notesLine = (r.notes || []).length
+        ? `<div style="font-size:11px; color:var(--orange); margin-top:2px;">${r.notes.map(n => escapeHtmlAttr(n)).join('<br>')}</div>`
+        : '';
+    return `
+        <div style="display:flex; align-items:flex-start; gap:10px; padding:8px 0; border-bottom:1px solid var(--border); flex-wrap:wrap;">
+            <input type="checkbox" id="user-import-check-${r.row}" checked style="width:16px; height:16px; margin-top:4px; flex-shrink:0;">
+            <div style="flex:1; min-width:220px; font-size:12px;">
+                ${actionBadge} <strong>${escapeHtmlAttr(r.full_name)}</strong>${identLine}<br>
+                <span style="color:var(--muted);">${escapeHtmlAttr(r.email)}</span>
+                ${currentLine}
+                ${notesLine}
+            </div>
+            <select class="form-select" id="user-import-dept-${r.row}" style="width:auto; min-width:180px; flex-shrink:0;">${userImportDeptOptions(presetDeptId)}</select>
+            <select class="form-select" id="user-import-role-${r.row}" style="width:auto; min-width:160px; flex-shrink:0;">${userImportRoleOptions(presetRole)}</select>
+        </div>`;
+}
+
+/**
+ * Renders the full review screen from userImportAnalysis into #user-import-review: the summary
+ * line, an "Errors" <details> for rows analyzeUsersImport() couldn't resolve at all (bad Badge
+ * ID/Username, an unrecognized Department/Role name -- these have no checkbox, there's nothing
+ * to review), the batch-apply bar (applyUserImportBatch()), one userImportRowHtml() per proposal
+ * row, and the Commit button.
+ */
+function renderUserImportReview() {
+    const container = document.getElementById('user-import-review');
+    if (!container || !userImportAnalysis) return;
+    const { rows, errorRows, summary, departments } = userImportAnalysis;
+
+    const errorsHtml = (errorRows && errorRows.length)
+        ? `<details style="margin-bottom:16px;"><summary style="cursor:pointer; font-weight:bold; font-size:12px; text-transform:uppercase; color:var(--red);">${icon('triangle-alert', 'icon-warning')} Rows With Errors (${errorRows.length}) -- fix the CSV and re-upload to include these</summary>${errorRows.map(e => `<div style="padding:4px 0; font-size:12px; border-bottom:1px solid var(--border);"><span style="font-family:monospace; color:var(--muted);">Row ${e.row}${e.badge && e.badge !== '(new)' ? ` (${escapeHtmlAttr(e.badge)})` : ''}:</span> ${escapeHtmlAttr(e.message)}</div>`).join('')}</details>`
+        : '';
+
+    if (rows.length === 0) {
+        container.style.display = 'block';
+        container.innerHTML = `<div style="font-size:13px; margin-bottom:12px;">${summary.total} row(s) read -- none are importable as-is.</div>${errorsHtml}`;
+        return;
+    }
+
+    const deptBatchOptions = departments.map(d => `<option value="${d.dept_id}">${d.name}</option>`).join('');
+    container.innerHTML = `
+        <div style="font-size:13px; margin-bottom:12px;">${summary.total} row(s) read. <strong style="color:var(--green);">${summary.toCreate}</strong> to create, <strong style="color:var(--accent);">${summary.toUpdate}</strong> to update${summary.errors ? `, ${summary.errors} with errors` : ''}. Review/adjust Department and Role below, uncheck anything not ready, then commit.</div>
+        ${errorsHtml}
+        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; background: rgba(203,96,21,0.1); border: 1px solid var(--accent); border-radius: 8px; padding: 10px 14px; margin-bottom: 14px;">
+            <strong style="font-size:12px;">Apply to all checked rows:</strong>
+            <select class="form-select" id="user-import-batch-dept" style="width:auto;"><option value="" selected>-- Department (no change) --</option>${deptBatchOptions}</select>
+            <select class="form-select" id="user-import-batch-role" style="width:auto;"><option value="" selected>-- Role (no change) --</option>${roleOptionsUpTo(currentAdminWeight, null)}</select>
+            <button type="button" class="btn btn-secondary" style="width:auto;" onclick="applyUserImportBatch()">Apply</button>
+        </div>
+        <div>${rows.map(userImportRowHtml).join('')}</div>
+        <button type="button" class="btn btn-primary" id="user-import-commit-btn" style="width:auto; margin-top:14px;" onclick="commitUsersImport()">Commit Selected</button>
+    `;
+    container.style.display = 'block';
+}
+
+/**
+ * Sets every checked row's Department and/or Role <select> to the batch bar's current choice --
+ * same "pick one target, apply it to every selected item" idea as the Master Storage & Asset
+ * Tree's own Batch Select ("Move Selected..."), adapted inline here (two plain <select>s) rather
+ * than a separate modal, since there's nothing else to configure for either field. Leaving the
+ * batch Department (or Role) select on its own placeholder skips that field entirely, so this can
+ * also be used to apply just one of the two without touching the other.
+ */
+function applyUserImportBatch() {
+    const deptVal = document.getElementById('user-import-batch-dept').value;
+    const roleVal = document.getElementById('user-import-batch-role').value;
+    if (!deptVal && !roleVal) return alert('⚠️ Choose a Department and/or Role to apply first.');
+
+    (userImportAnalysis.rows || []).forEach(r => {
+        const checkbox = document.getElementById(`user-import-check-${r.row}`);
+        if (!checkbox || !checkbox.checked) return;
+        if (deptVal) { const sel = document.getElementById(`user-import-dept-${r.row}`); if (sel) sel.value = deptVal; }
+        if (roleVal) { const sel = document.getElementById(`user-import-role-${r.row}`); if (sel) sel.value = roleVal; }
+    });
+}
+
+/**
+ * Builds the commit payload from whichever rows are currently checked (reading straight from the
+ * DOM, same reasoning as commitMpcImport()), validates every checked row has a Role and (unless
+ * that row's Role is Super Admin) a Department chosen, and POSTs it to
+ * POST /api/users/import/commit. Full Name/Email/action/badge_id are echoed straight from
+ * userImportAnalysis (never re-read from any input -- Full Name/Email are display-only on this
+ * screen, not editable here).
+ */
+async function commitUsersImport() {
+    if (!userImportAnalysis) return;
+    const payload = [];
+    // Collected rather than aborting the whole commit on the first one -- on a real multi-row
+    // import (the whole reason Department/Role are optional now) it's normal for several rows to
+    // still need a pick, and one unfinished row out of many shouldn't block every other
+    // already-complete row from going through.
+    const skipped = [];
+
+    for (const r of userImportAnalysis.rows) {
+        const checkbox = document.getElementById(`user-import-check-${r.row}`);
+        if (!checkbox || !checkbox.checked) continue;
+
+        const deptSel = document.getElementById(`user-import-dept-${r.row}`);
+        const roleSel = document.getElementById(`user-import-role-${r.row}`);
+        const department_id = deptSel ? deptSel.value : '';
+        const role = roleSel ? roleSel.value : '';
+        if (!role) { skipped.push(`"${r.full_name}" (row ${r.row}): needs a Role selected`); continue; }
+        if (!department_id && role !== 'super_admin') { skipped.push(`"${r.full_name}" (row ${r.row}): needs a Department selected`); continue; }
+
+        payload.push({ row: r.row, action: r.action, badge_id: r.badge_id, full_name: r.full_name, email: r.email, department_id: department_id || null, role });
+    }
+
+    if (skipped.length > 0) {
+        const proceed = confirm(`${skipped.length} checked row(s) are missing a Role/Department and will be skipped this round:\n\n${skipped.join('\n')}\n\nImport the other ${payload.length} row(s) now, and come back for the rest later?`);
+        if (!proceed) return;
+    }
+    if (payload.length === 0) return alert('⚠️ Nothing is checked and complete to import.');
+
+    const btn = document.getElementById('user-import-commit-btn');
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = 'Importing...';
+
+    try {
+        const res = await fetch('/api/users/import/commit', {
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
+            body: JSON.stringify({ rows: payload })
+        });
         const data = await res.json();
         if (!res.ok) { alert('❌ ' + (data.error || 'Import failed.')); return; }
-
-        const { results, summary } = data;
-        document.getElementById('user-import-results-container').style.display = 'block';
-        document.getElementById('user-import-summary').textContent = `${summary.created} created, ${summary.updated} updated, ${summary.errors} error(s).`;
-        document.getElementById('user-import-results-body').innerHTML = results.map(r => {
-            const color = r.result === 'error' ? 'var(--red)' : (r.result === 'created' ? 'var(--green)' : 'var(--accent)');
-            const resultIcon = r.result === 'error' ? icon('circle-x') : icon('circle-check');
-            // Every field here can come straight from an untrusted CSV cell (badge/message are
-            // echoed from the uploaded file, including on a failed row) -- escaped the same way
-            // work_order free text is elsewhere in this file, not trusted just because the import
-            // also required dept_admin+ to run.
-            return `<tr><td>${r.row}</td><td style="font-family: monospace;">${escapeHtmlAttr(r.badge)}</td><td style="color: ${color}; font-weight: bold;">${resultIcon} ${r.result}</td><td>${escapeHtmlAttr(r.message)}</td></tr>`;
-        }).join('');
-
-        globalUserImportCredentials = results.filter(r => r.credentials).map(r => r.credentials);
-        const credSection = document.getElementById('user-import-credentials-section');
-        if (globalUserImportCredentials.length > 0) {
-            credSection.style.display = 'block';
-            // full_name/username are CSV-sourced (username is derived from the CSV's own Email
-            // cell) -- escaped for the same reason as the results table above, right next to a
-            // freshly-generated PIN this time, which makes an unescaped injection here more
-            // valuable to an attacker, not less.
-            document.getElementById('user-import-credentials-body').innerHTML = globalUserImportCredentials.map(c => `
-                <tr><td>${escapeHtmlAttr(c.full_name)}</td><td style="font-family:monospace;">${escapeHtmlAttr(c.badge_id)}</td><td style="font-family:monospace;">${escapeHtmlAttr(c.username)}</td><td style="font-family:monospace; font-weight:bold; color:var(--accent);">${escapeHtmlAttr(c.pin)}</td></tr>
-            `).join('');
-        } else {
-            credSection.style.display = 'none';
-        }
-
-        fileInput.value = '';
+        renderUserImportCommitResults(data);
         loadUsers(); loadRosterDirectory();
     } catch (err) {
         alert('❌ Network error during import.');
     } finally {
-        btn.innerHTML = `${icon('upload')} Import`; btn.disabled = false;
+        btn.disabled = false;
+        btn.textContent = originalText;
+    }
+}
+
+/**
+ * Renders commitUsersImport()'s per-row results into #user-import-results-container (left in
+ * place below the review screen) -- same results-table shape, and the same credentials-handout
+ * split into globalUserImportCredentials, as the old direct-commit importer's own
+ * submitUsersImport() used to render inline. copyUserImportCredentials()/
+ * printUserImportCredentials() below are unchanged and still just read globalUserImportCredentials.
+ */
+function renderUserImportCommitResults(data) {
+    const { results, summary } = data;
+    document.getElementById('user-import-results-container').style.display = 'block';
+    document.getElementById('user-import-summary').textContent = `${summary.created} created, ${summary.updated} updated, ${summary.errors} error(s).`;
+    document.getElementById('user-import-results-body').innerHTML = results.map(r => {
+        const color = r.result === 'error' ? 'var(--red)' : (r.result === 'created' ? 'var(--green)' : 'var(--accent)');
+        const resultIcon = r.result === 'error' ? icon('circle-x') : icon('circle-check');
+        // badge/message can both still originate from CSV-derived free text (badge is the
+        // matched person's real badge on an update, but message can echo a department name back
+        // on an error) -- escaped the same way the old direct-commit importer's results table
+        // always did, not trusted just because commit also required dept_admin+ to reach.
+        return `<tr><td>${r.row}</td><td style="font-family: monospace;">${escapeHtmlAttr(r.badge)}</td><td style="color: ${color}; font-weight: bold;">${resultIcon} ${r.result}</td><td>${escapeHtmlAttr(r.message)}</td></tr>`;
+    }).join('');
+
+    globalUserImportCredentials = results.filter(r => r.credentials).map(r => r.credentials);
+    const credSection = document.getElementById('user-import-credentials-section');
+    if (globalUserImportCredentials.length > 0) {
+        credSection.style.display = 'block';
+        // full_name/username are CSV-sourced (username is derived from the CSV's own Email
+        // cell) -- escaped for the same reason as the results table above, right next to a
+        // freshly-generated PIN this time, which makes an unescaped injection here more
+        // valuable to an attacker, not less.
+        document.getElementById('user-import-credentials-body').innerHTML = globalUserImportCredentials.map(c => `
+            <tr><td>${escapeHtmlAttr(c.full_name)}</td><td style="font-family:monospace;">${escapeHtmlAttr(c.badge_id)}</td><td style="font-family:monospace;">${escapeHtmlAttr(c.username)}</td><td style="font-family:monospace; font-weight:bold; color:var(--accent);">${escapeHtmlAttr(c.pin)}</td></tr>
+        `).join('');
+    } else {
+        credSection.style.display = 'none';
     }
 }
 
