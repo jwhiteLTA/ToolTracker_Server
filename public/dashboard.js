@@ -30,12 +30,17 @@ async function checkDashboardAuth() {
         if (res.ok) return showDashApp();
     } catch (err) { /* fall through to login wall */ }
     document.getElementById('dash-auth-wall').style.display = 'flex';
-    document.getElementById('dash-app').style.display = 'none';
+    document.querySelector('.sidebar').style.display = 'none';
+    document.querySelector('.main-content').style.display = 'none';
 }
 
 function showDashApp() {
     document.getElementById('dash-auth-wall').style.display = 'none';
-    document.getElementById('dash-app').style.display = 'block';
+    // Not 'block' -- .sidebar/.main-content are flex items of body.dashboard-layout's own
+    // row-flex layout (style.css), so clearing the inline override entirely lets that CSS
+    // cascade determine the right display value instead of hard-coding one that fights it.
+    document.querySelector('.sidebar').style.display = '';
+    document.querySelector('.main-content').style.display = '';
     bootDashboard();
 }
 

@@ -172,7 +172,7 @@ if (!process.env.SESSION_SECRET) {
     console.error('FATAL: SESSION_SECRET is not set. Copy .env.example to .env and generate a real secret.');
     process.exit(1);
 }
-app.use(session({
+const adminSessionMiddleware = session({
     store: new pgSession({ pool, createTableIfMissing: true, tableName: 'session' }),
     secret: process.env.SESSION_SECRET,
     name: 'tt.sid',
@@ -185,7 +185,18 @@ app.use(session({
         sameSite: 'lax',
         maxAge: 8 * 60 * 60 * 1000, // 8 hours -- one work shift
     },
-}));
+});
+// Skips /api/dashboard* entirely rather than a plain app.use(adminSessionMiddleware) -- two
+// express-session instances both touching the same request (this one running unconditionally,
+// the dashboard one below scoped to /api/dashboard) each independently hook the response to
+// save their own session/cookie, and having both fire on the same request is what broke the
+// dashboard login not persisting across a reload: whichever one's save won the race determined
+// what actually got written back, not reliably the dashboard one. Excluding dashboard paths here
+// means exactly one session middleware ever touches a given request, full stop.
+app.use((req, res, next) => {
+    if (req.path.startsWith('/api/dashboard')) return next();
+    return adminSessionMiddleware(req, res, next);
+});
 
 // Separate, long-lived session for the read-only Dashboard app -- a distinct cookie name
 // ('dash.sid' vs the admin session's 'tt.sid' above) and its own session() instance, mounted
@@ -1978,7 +1989,21 @@ app.put('/api/users/:badge_id/department-access', requireFetchHeader, requireRol
 app.put('/api/users/me/update', requireFetchHeader, requireRole(1), async (req, res) => {
     const { new_username, new_pin } = req.body;
     try {
-        if (new_username) await pool.query('UPDATE users SET username = $1 WHERE badge_id = $2', [new_username, req.authUser.badge_id]);
+        if (new_username) {
+            // Lowercased, matching POST /api/users' own convention at account creation --
+            // this self-service rename used to skip that, which is how two active accounts
+            // differing only by case could exist in the first place. users_username_active_key
+            // (migrations/029) is now a case-insensitive index regardless, so a case-variant of
+            // someone else's username is rejected either way; this just keeps new usernames
+            // consistently lowercase too, not merely rejected-if-conflicting.
+            const username = new_username.trim().toLowerCase();
+            try {
+                await pool.query('UPDATE users SET username = $1 WHERE badge_id = $2', [username, req.authUser.badge_id]);
+            } catch (err) {
+                if (err.code === '23505') return res.status(400).json({ error: 'That username is already taken.' });
+                throw err;
+            }
+        }
         if (new_pin) {
             if (!/^\d{4,10}$/.test(new_pin)) {
                 return res.status(400).json({ error: 'PIN must be 4-10 digits.' });

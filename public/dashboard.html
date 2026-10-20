@@ -25,9 +25,12 @@
     <!-- Auth wall: long-lived dashboard-only session (see requireDashboardAuth/dash.sid in
          server.js), fully separate from the admin panel's session -- this login never grants
          admin or kiosk access. Shown by default; checkDashboardAuth() in dashboard.js hides it
-         and reveals #dash-app on an existing valid session or a successful login. No idle
-         timeout by design -- meant to stay signed in on an unattended shop-floor display. -->
-    <div id="dash-auth-wall" style="min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px;">
+         and reveals .sidebar/.main-content on an existing valid session or a successful login.
+         No idle timeout by design -- meant to stay signed in on an unattended shop-floor
+         display. position:fixed deliberately takes this OUT of body.dashboard-layout's own
+         row-flex layout (see style.css) -- as a normal flex child it was being squeezed into a
+         content-sized column instead of centering against the full viewport. -->
+    <div id="dash-auth-wall" style="position:fixed; inset:0; z-index:500; background:var(--bg); display:flex; align-items:center; justify-content:center; padding:20px;">
         <div class="card" style="width:100%; max-width:380px;">
             <h2 style="margin-bottom:8px; text-align:center;">LTA Dashboard</h2>
             <p style="color:var(--muted); font-size:12px; text-align:center; margin-bottom:16px;">Scan your login card, or sign in manually below</p>
@@ -57,10 +60,12 @@
         </div>
     </div>
 
-    <div id="dash-app" style="display:none;">
-
-    <!-- Sidebar navigation tree: global overview link + dynamically-populated storage directory tree -->
-    <div class="sidebar no-print">
+    <!-- Sidebar navigation tree: global overview link + dynamically-populated storage directory tree.
+         Hidden until checkDashboardAuth()/showDashApp() in dashboard.js reveals it -- kept as a
+         DIRECT child of body.dashboard-layout (not wrapped) since that element's own CSS rule is a
+         row-flex layout that specifically expects .sidebar and .main-content as direct children;
+         wrapping them broke that layout entirely. -->
+    <div class="sidebar no-print" style="display:none;">
         <div class="sidebar-header" style="display:flex; align-items:center; justify-content:space-between;">
             LTA Telemetry
             <span onclick="logoutDashboard()" title="Sign out" style="cursor:pointer; color:var(--muted); font-size:11px; text-decoration:underline;">Sign Out</span>
@@ -74,7 +79,7 @@
             </div>
     </div>
 
-    <div class="main-content">
+    <div class="main-content" style="display:none;">
         <h2 style="margin-bottom: 30px;">Live Telemetry</h2>
 
         <div id="view-global">
@@ -326,8 +331,6 @@
         </div>
 
     </div>
-
-    </div><!-- /#dash-app -->
 
     <!-- Read-only tool detail modal: opened by clicking any tool row in the global or per-location tables. Permanently view-only -- no edit/delete controls. -->
     <div id="tool-detail-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.8); z-index: 9999; justify-content: center; align-items: center; padding: 20px;" onclick="if (event.target === this) closeToolDetailModal();">
