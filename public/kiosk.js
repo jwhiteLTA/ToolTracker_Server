@@ -571,7 +571,17 @@ function isAnyKioskModalOpen() {
  */
 function focusScanInput(inputId) {
     const input = document.getElementById(inputId);
-    if (input && document.getElementById('screen-action').style.display === 'flex' && !isAnyKioskModalOpen()) {
+    if (!input) return;
+    // Same reasoning as the isAnyKioskModalOpen() guard below, generalized: don't steal focus
+    // from a field the operator is actively using. The Buddy Sign-Off PIN field is covered by
+    // that modal check, but Work Order and Location sit right on the scanner panel itself, not
+    // in a modal -- without this, clicking into either one got immediately yanked back to the
+    // scan input by this same blur-triggered refocus, making them unusable to type into.
+    const active = document.activeElement;
+    if (active && active !== input && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName)) {
+        return;
+    }
+    if (document.getElementById('screen-action').style.display === 'flex' && !isAnyKioskModalOpen()) {
         input.focus();
     }
 }

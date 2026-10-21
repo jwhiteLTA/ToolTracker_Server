@@ -214,7 +214,8 @@ function toggleTreeVisibility(containerId, headerElement) {
  *   - weight < 2 (below tool_rep): hides #hub-inventory, #hub-reports, and #hub-departments hub cards.
  *   - weight < 3 (below dept_admin): hides #card-manage-boxes, #card-manage-drawers,
  *     #card-manage-users, #card-inventory-import (bulk CSV import), #card-trace-investigations,
- *     #card-tool-groups, #card-mpc-import, and #audit-schedule-card.
+ *     #card-tool-groups (and its Inventory hub tile #hub-inv-tool-groups), #card-mpc-import,
+ *     and #audit-schedule-card.
  *   - weight < 4 (below super_admin): hides #card-manage-depts.
  * Populates the Provision New User form's role dropdown with options capped at the viewer's
  * own weight (inclusive) -- matches POST /api/users, which now allows creating a peer, e.g. a
@@ -250,6 +251,7 @@ function bootstrapAdminUI(user) {
         safeSetDisplay('card-user-import', 'none');
         safeSetDisplay('card-trace-investigations', 'none');
         safeSetDisplay('card-tool-groups', 'none');
+        safeSetDisplay('hub-inv-tool-groups', 'none');
         safeSetDisplay('card-system-info', 'none');
         safeSetDisplay('card-mpc-import', 'none');
         safeSetDisplay('audit-schedule-card', 'none');
