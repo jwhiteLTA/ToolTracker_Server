@@ -1879,12 +1879,16 @@ function auditTimeStringToMinutes(timeStr) {
     return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : NaN;
 }
 
+let auditScheduleData = null; // last-fetched departments, cached so opening/closing a row's edit form can re-render locally without a round trip
+const auditScheduleEditing = new Set(); // schedule_ids (as strings) whose row is currently showing its editable form
+
 /**
  * Fills #audit-schedule-list (dept_admin+ only, see bootstrapAdminUI) from GET /api/audit-schedules
  * -- one section per department this user can manage. A department still on the implicit
  * default schedule shows its (read-only) windows plus a "Customize This Schedule" button;
- * once customized, every window is a real row with its own editable label/time and a delete
- * button, plus an "+ Add Window" row. Modeled on the Tool Groups admin list (loadToolGroups()
+ * once customized, each window shows as a read-only row with Edit/Remove buttons until Edit is
+ * clicked, which swaps just that row into its editable label/time form (see renderAuditSchedules),
+ * plus an "+ Add Window" row. Modeled on the Tool Groups admin list (loadToolGroups()
  * above) -- one delegated click handler routes every row action by data-action.
  */
 async function loadAuditSchedules() {
@@ -1895,35 +1899,9 @@ async function loadAuditSchedules() {
         const data = await res.json();
         if (!res.ok || !data.success) { container.innerHTML = `<span style="color:var(--muted);">Could not load.</span>`; return; }
 
-        container.innerHTML = data.departments.map(dept => `
-            <div style="border-bottom:1px solid var(--border); padding:10px 0;" data-dept-section="${dept.dept_id}">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                    <div style="font-weight:bold; font-size:13px;">${dept.name}</div>
-                    ${dept.is_default ? `<span style="font-size:10px; color:var(--muted);">Using default schedule</span>` : ''}
-                </div>
-                <div style="display:flex; flex-direction:column; gap:6px;">
-                    ${dept.windows.map(w => dept.is_default ? `
-                        <div style="display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted);">
-                            <span style="flex:1;">${w.label}</span>
-                            <span>${auditMinutesToTimeString(w.start_minute)}</span>
-                        </div>
-                    ` : `
-                        <div style="display:flex; align-items:center; gap:6px;" data-schedule-id="${w.schedule_id}">
-                            <input class="form-input" style="flex:1; min-width:100px;" value="${w.label}" data-field="label">
-                            <input class="form-input" type="time" style="width:110px;" value="${auditMinutesToTimeString(w.start_minute)}" data-field="start_minute">
-                            <button type="button" class="btn-icon" title="Save" data-action="save-window">${icon('save')}</button>
-                            <button type="button" class="btn-icon" title="Remove" data-action="delete-window">${icon('x')}</button>
-                        </div>
-                    `).join('')}
-                    ${dept.is_default
-                        ? `<button type="button" class="btn btn-secondary" style="width:auto; align-self:flex-start; margin-top:4px;" data-action="customize" data-dept-id="${dept.dept_id}">Customize This Schedule</button>`
-                        : `<div style="display:flex; align-items:center; gap:6px; margin-top:4px;" data-add-row data-dept-id="${dept.dept_id}">
-                               <input class="form-input" style="flex:1; min-width:100px;" placeholder="Label (e.g. Night Shift)" data-field="label">
-                               <input class="form-input" type="time" style="width:110px;" data-field="start_minute">
-                               <button type="button" class="btn-icon" title="Add Window" data-action="add-window">${icon('plus')}</button>
-                           </div>`}
-                </div>
-            </div>`).join('');
+        auditScheduleData = data.departments;
+        auditScheduleEditing.clear();
+        renderAuditSchedules();
 
         if (!container.dataset.delegated) {
             container.dataset.delegated = 'true';
@@ -1934,6 +1912,54 @@ async function loadAuditSchedules() {
     }
 }
 
+/** Renders #audit-schedule-list from the cached auditScheduleData/auditScheduleEditing -- called after a fresh fetch and again, with no network round trip, whenever a row's edit state toggles locally. */
+function renderAuditSchedules() {
+    const container = document.getElementById('audit-schedule-list');
+    if (!container || !auditScheduleData) return;
+
+    container.innerHTML = auditScheduleData.map(dept => `
+        <div style="border-bottom:1px solid var(--border); padding:10px 0;" data-dept-section="${dept.dept_id}">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <div style="font-weight:bold; font-size:13px;">${dept.name}</div>
+                ${dept.is_default ? `<span style="font-size:10px; color:var(--muted);">Using default schedule</span>` : ''}
+            </div>
+            <div style="display:flex; flex-direction:column; gap:6px;">
+                ${dept.windows.map(w => {
+                    if (dept.is_default) {
+                        return `
+                        <div style="display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted);">
+                            <span style="flex:1;">${w.label}</span>
+                            <span>${auditMinutesToTimeString(w.start_minute)}</span>
+                        </div>`;
+                    }
+                    if (auditScheduleEditing.has(String(w.schedule_id))) {
+                        return `
+                        <div style="display:flex; align-items:center; gap:6px;" data-schedule-id="${w.schedule_id}">
+                            <input class="form-input" style="flex:1; min-width:100px;" value="${w.label}" data-field="label">
+                            <input class="form-input" type="time" style="width:110px;" value="${auditMinutesToTimeString(w.start_minute)}" data-field="start_minute">
+                            <button type="button" class="btn-icon" title="Save" data-action="save-window">${icon('save')}</button>
+                            <button type="button" class="btn-icon" title="Cancel" data-action="cancel-window">${icon('x')}</button>
+                        </div>`;
+                    }
+                    return `
+                        <div style="display:flex; align-items:center; gap:8px; font-size:12px;" data-schedule-id="${w.schedule_id}">
+                            <span style="flex:1;">${w.label}</span>
+                            <span style="color:var(--muted);">${auditMinutesToTimeString(w.start_minute)}</span>
+                            <button type="button" class="btn-icon" title="Edit" data-action="edit-window">${icon('pencil')}</button>
+                            <button type="button" class="btn-icon" title="Remove" data-action="delete-window">${icon('x')}</button>
+                        </div>`;
+                }).join('')}
+                ${dept.is_default
+                    ? `<button type="button" class="btn btn-secondary" style="width:auto; align-self:flex-start; margin-top:4px;" data-action="customize" data-dept-id="${dept.dept_id}">Customize This Schedule</button>`
+                    : `<div style="display:flex; align-items:center; gap:6px; margin-top:4px;" data-add-row data-dept-id="${dept.dept_id}">
+                           <input class="form-input" style="flex:1; min-width:100px;" placeholder="Label (e.g. Night Shift)" data-field="label">
+                           <input class="form-input" type="time" style="width:110px;" data-field="start_minute">
+                           <button type="button" class="btn-icon" title="Add Window" data-action="add-window">${icon('plus')}</button>
+                       </div>`}
+            </div>
+        </div>`).join('');
+}
+
 /** Single delegated click handler for #audit-schedule-list -- routes by data-action on the clicked element. */
 function onAuditScheduleListClick(event) {
     const el = event.target.closest('[data-action]');
@@ -1942,6 +1968,14 @@ function onAuditScheduleListClick(event) {
     else if (el.dataset.action === 'add-window') {
         const rowEl = el.closest('[data-add-row]');
         addAuditWindow(rowEl.dataset.deptId, rowEl);
+    }
+    else if (el.dataset.action === 'edit-window') {
+        auditScheduleEditing.add(el.closest('[data-schedule-id]').dataset.scheduleId);
+        renderAuditSchedules();
+    }
+    else if (el.dataset.action === 'cancel-window') {
+        auditScheduleEditing.delete(el.closest('[data-schedule-id]').dataset.scheduleId);
+        renderAuditSchedules();
     }
     else if (el.dataset.action === 'save-window') saveAuditWindow(el.closest('[data-schedule-id]'));
     else if (el.dataset.action === 'delete-window') deleteAuditWindow(el.closest('[data-schedule-id]').dataset.scheduleId, el.closest('[data-dept-section]'));
