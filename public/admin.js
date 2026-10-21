@@ -250,6 +250,7 @@ function bootstrapAdminUI(user) {
         safeSetDisplay('card-user-import', 'none');
         safeSetDisplay('card-trace-investigations', 'none');
         safeSetDisplay('card-tool-groups', 'none');
+        safeSetDisplay('card-system-info', 'none');
         safeSetDisplay('card-mpc-import', 'none');
         safeSetDisplay('audit-schedule-card', 'none');
     }
@@ -4916,6 +4917,45 @@ async function deleteToolGroup(id) {
     const data = await res.json();
     if (!res.ok) return alert('❌ ' + (data.error || 'Failed to delete tool group.'));
     loadToolGroups();
+}
+
+/**
+ * Fills #system-info-body (Reports workspace) from GET /api/admin/system-info -- every value is
+ * read live off the current request/process, never a stored setting, so this is always accurate
+ * no matter which domain, tunnel, or network the viewing device is actually going through.
+ * Surfaces the exact "which address, is it secure" question that took real back-and-forth to
+ * diagnose by hand earlier -- a non-secure connection gets an explicit warning here instead of
+ * silently breaking login persistence and camera scanning with no obvious cause.
+ */
+async function loadSystemInfo() {
+    const body = document.getElementById('system-info-body');
+    if (!body) return;
+    try {
+        const res = await fetch('/api/admin/system-info');
+        if (!res.ok) { body.innerHTML = `<span style="color:var(--muted);">Could not load.</span>`; return; }
+        const d = await res.json();
+
+        const days = Math.floor(d.uptime_seconds / 86400);
+        const hours = Math.floor((d.uptime_seconds % 86400) / 3600);
+        const minutes = Math.floor((d.uptime_seconds % 3600) / 60);
+        const uptime = days > 0 ? `${days}d ${hours}h` : hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+
+        const rows = [
+            ['Connected via', `<code>${escapeHtmlAttr(d.connected_via)}</code>`],
+            ['Environment', escapeHtmlAttr(d.environment)],
+            ['Running version', `<code>${escapeHtmlAttr(d.deploy_commit)}</code>`],
+            ['Server uptime', uptime],
+            ['Node.js', escapeHtmlAttr(d.node_version)],
+        ];
+
+        body.innerHTML = `
+            ${!d.secure ? `<div style="background:var(--accent-bg, rgba(255,150,0,0.1)); border:1px solid var(--orange); border-radius:6px; padding:8px 10px; margin-bottom:10px; font-size:12px; color:var(--orange);">${icon('triangle-alert')} Not a secure (HTTPS) connection on this device right now -- logins won't stay signed in and camera scanning won't work until this is reached over a real https:// address.</div>` : ''}
+            <div style="display:grid; grid-template-columns:auto 1fr; gap:6px 14px; font-size:13px;">
+                ${rows.map(([label, value]) => `<div style="color:var(--muted);">${label}</div><div>${value}</div>`).join('')}
+            </div>`;
+    } catch (e) {
+        body.innerHTML = `<span style="color:var(--muted);">Could not load.</span>`;
+    }
 }
 
 /**

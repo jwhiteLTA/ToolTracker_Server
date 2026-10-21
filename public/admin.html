@@ -99,7 +99,7 @@
                 <div class="hub-icon"><span class="icon" data-icon="package"></span></div><div class="hub-title">Inventory</div><div class="hub-desc">Manage physical storage and tools.</div>
             </div>
             <!-- Card 4: Reports (hidden for roles below tool_rep via currentAdminWeight check in loginAdmin) -->
-            <div class="hub-card" id="hub-reports" onclick="openWorkspace('ws-reports'); loadCalendarFeedInfo(); loadWorkOrders(); loadTraceInvestigationsList(); loadToolGroups();">
+            <div class="hub-card" id="hub-reports" onclick="openWorkspace('ws-reports'); loadCalendarFeedInfo(); loadWorkOrders(); loadTraceInvestigationsList(); loadToolGroups(); loadSystemInfo();">
                 <div class="hub-icon"><span class="icon" data-icon="bar-chart"></span></div><div class="hub-title">Telemetry & Reports</div><div class="hub-desc">Custom queries and data export.</div>
             </div>
         </div>
@@ -611,6 +611,13 @@
                     <h3 style="margin-bottom: 8px;">Calibration Calendar Feed</h3>
                     <p style="font-size: 12px; color: var(--muted); margin-bottom: 16px;">A private, read-only calendar of every calibrated tool's due date. Subscribe from Google/Outlook/Apple Calendar ("From URL") for auto-refreshing reminders, or download and import a snapshot.</p>
                     <div id="calendar-feed-body">Loading…</div>
+                </div>
+
+                <!-- dept_admin+ (server-gated via requireRole(3) on GET /api/admin/system-info) -- hidden for everyone else by bootstrapAdminUI's weight<3 block. Read-only, derived live from the current request/process, never a stored setting -- see the endpoint's own comment in server.js. -->
+                <div class="card no-print" id="card-system-info">
+                    <h3 style="margin-bottom: 8px;">System Info</h3>
+                    <p style="font-size: 12px; color: var(--muted); margin-bottom: 16px;">What this device is actually connected to right now -- handy when something looks different across two devices or networks.</p>
+                    <div id="system-info-body">Loading…</div>
                 </div>
 
                 <!-- super_admin only (server-gated via requireRole(4) on GET /api/admin/export-all) -- hidden for everyone else by bootstrapAdminUI's weight<4 block, same as #card-calendar-feed. -->

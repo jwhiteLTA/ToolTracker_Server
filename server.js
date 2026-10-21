@@ -9,6 +9,18 @@ const session = require('express-session');
 const pgSession = require('connect-pg-simple')(session);
 const rateLimit = require('express-rate-limit');
 const { Pool, types } = require('pg');
+const { execSync } = require('child_process');
+
+// Read once at startup (not per-request -- this never changes without a restart anyway) for
+// GET /api/admin/system-info. Falls back to 'unknown' rather than crashing the whole server if
+// .git isn't present for some reason (e.g. a deployment that copied files instead of cloning).
+const DEPLOY_COMMIT = (() => {
+    try {
+        return execSync('git rev-parse --short HEAD', { cwd: __dirname }).toString().trim();
+    } catch (err) {
+        return 'unknown';
+    }
+})();
 
 // Every "timestamp" column in this schema is `timestamp without time zone`, and every row is
 // written while the DB session's timezone is UTC (see docker-compose.yml -- the stock
@@ -6568,6 +6580,27 @@ app.get('/api/calendar/calibration.ics', calendarFeedLimiter, async (req, res) =
 // that could drift apart. super_admin-only: this bundles the entire database (every user,
 // every tool, every calibration record) plus every uploaded photo and certificate, not a
 // narrow slice -- the most sensitive export surface in the app.
+// ==========================================
+// 8.8 SYSTEM INFO (read-only, for the admin panel's own "what am I looking at" card)
+// ==========================================
+// Answers exactly the kind of question that took real back-and-forth to diagnose this session
+// (which hostname/protocol a given device is actually hitting, whether a deploy landed) --
+// derived from the live request and the running process, never a stored/configured value, so
+// it's always accurate regardless of which domain or tunnel currently fronts this app.
+// Deliberately just dept_admin+ (not super_admin-only, see requireRole(4) above) -- nothing
+// here is sensitive, it's the same category of info visible in any browser's dev tools.
+app.get('/api/admin/system-info', requireRole(3), (req, res) => {
+    res.json({
+        success: true,
+        connected_via: `${req.protocol}://${req.get('host')}`,
+        secure: req.secure,
+        environment: process.env.NODE_ENV || 'development',
+        deploy_commit: DEPLOY_COMMIT,
+        node_version: process.version,
+        uptime_seconds: Math.floor(process.uptime()),
+    });
+});
+
 app.get('/api/admin/export-all', requireFetchHeader, requireRole(4), async (req, res) => {
     let archivePath = null;
     try {
