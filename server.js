@@ -2424,10 +2424,25 @@ app.post('/api/users/import/commit', requireFetchHeader, requireRole(3), async (
                 const newBadgeId = prefix + String((maxRes.rows[0].max_num || 0) + 1).padStart(3, '0');
 
                 const newPin = generatePin();
-                await pool.query(
-                    `INSERT INTO users (badge_id, full_name, email, username, dept_id, role, pin_hash) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-                    [newBadgeId, full_name, email, username, finalDeptId, role, await hashPin(newPin)]
-                );
+                try {
+                    await pool.query(
+                        `INSERT INTO users (badge_id, full_name, email, username, dept_id, role, pin_hash) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                        [newBadgeId, full_name, email, username, finalDeptId, role, await hashPin(newPin)]
+                    );
+                } catch (err) {
+                    // Translates the two realistic collisions into a clear per-row message
+                    // instead of the raw Postgres constraint error -- email is the obvious one
+                    // (someone uploads the same person twice, or re-runs a batch that already
+                    // went through); username is less obvious, since it's DERIVED from the
+                    // email's part before the "@", so two people with genuinely different
+                    // emails (e.g. jdoe@gmail.com and jdoe@yahoo.com) can still collide there.
+                    if (err.code === '23505') {
+                        if (err.constraint === 'users_email_active_key') throw new Error(`An active account with the email "${email}" already exists.`);
+                        if (err.constraint === 'users_username_active_key') throw new Error(`An active account already uses the username "${username}" -- derived from the part of an email before the "@", so a different email can still collide here.`);
+                        throw new Error('This person conflicts with an existing active account.');
+                    }
+                    throw err;
+                }
                 created++;
                 results.push({
                     row: rowNum, badge: newBadgeId, result: 'created', message: `Created new user (${username}).`,
