@@ -116,7 +116,7 @@ body.dashboard-layout { display: flex; flex-direction: row; height: 100vh; overf
        16px here is the actual fix, not a design preference. Do not drop this below 16px. */
     font-size: 16px;
 }
-.form-input:focus, .form-select:focus { border-color: var(--accent); }
+.form-input:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(203,96,21,0.35); }
 
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: clamp(15px, 4vw, 24px); margin-bottom: 20px; overflow: hidden; height: fit-content; }
 
