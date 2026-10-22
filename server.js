@@ -124,6 +124,13 @@ app.use(helmet({
             ...helmet.contentSecurityPolicy.getDefaultDirectives(),
             'script-src': ["'self'", "'unsafe-inline'"],
             'script-src-attr': ["'self'", "'unsafe-inline'"],
+            // Without an explicit connect-src, it falls back to default-src 'self' -- which
+            // silently blocks the admin panel's fetch() to the local NFC bridge (nfc-bridge/,
+            // http://127.0.0.1:8732) before the browser even attempts the network request. The
+            // bridge's own CORS/Private-Network-Access headers are irrelevant if CSP never lets
+            // the request leave in the first place; this is what was actually causing "NFC
+            // Bridge not reachable" even with the bridge genuinely running.
+            'connect-src': ["'self'", "http://127.0.0.1:8732"],
         },
     },
 }));
