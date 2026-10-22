@@ -1888,6 +1888,24 @@ app.get('/api/users/:badge_id/login-card.png', requireRole(3), async (req, res) 
     }
 });
 
+// Returns a user's raw login_token as JSON instead of rendering it into a QR -- the admin
+// panel's "Write to NFC Badge" button needs the literal value to hand to the local NFC bridge
+// running on the admin's own PC (see nfc-bridge/), which has no way to decode a QR image itself.
+// Same hierarchy protection as login-card.png immediately above, for the identical reason given
+// there: this value alone logs in as the person with no PIN, so reading it needs the same
+// protection as issuing it in the first place.
+app.get('/api/users/:badge_id/login-token-value', requireRole(3), async (req, res) => {
+    try {
+        const result = await pool.query('SELECT role, login_token FROM users WHERE badge_id = $1', [req.params.badge_id]);
+        if (result.rows.length === 0) return res.status(404).json({ error: 'User not found.' });
+        if (req.authUser.weight <= getRoleWeight(result.rows[0].role)) return res.status(403).json({ error: 'Hierarchy Violation.' });
+        if (!result.rows[0].login_token) return res.status(404).json({ error: 'No login card issued for this user.' });
+        res.json({ login_token: result.rows[0].login_token });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch login token.' });
+    }
+});
+
 // Deactivate a user account. Requester must outrank the target user (getRoleWeight hierarchy check).
 app.put('/api/users/:badge_id/deactivate', requireFetchHeader, requireRole(1), async (req, res) => {
     const { badge_id } = req.params;

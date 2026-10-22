@@ -1071,6 +1071,43 @@ async function issueUserLoginCard(id, isReissue) {
 }
 
 /**
+ * Sends the person's existing login_token to the local NFC bridge (see nfc-bridge/ in the repo)
+ * running on THIS admin's own PC, which writes it to a tag presented to the attached reader --
+ * the same credential the QR login card already encodes, just on a tap-able badge instead of
+ * printed paper. The token is fetched fresh via login-token-value rather than trusted from any
+ * cached state, same reasoning as printUserLoginCard() pulling the PNG live. The three ways this
+ * can fail (no card issued yet / bridge program not running on this PC / the write itself
+ * failed, e.g. no tag presented in time) are reported distinctly so the admin knows which one to
+ * fix instead of one generic error.
+ */
+async function writeNfcBadge(badgeId, btn) {
+    const originalHtml = btn ? btn.innerHTML : null;
+    try {
+        const tokenRes = await fetch(`/api/users/${badgeId}/login-token-value`);
+        const tokenData = await tokenRes.json();
+        if (!tokenRes.ok) return alert('❌ ' + (tokenData.error || 'Failed to fetch login token.'));
+
+        if (btn) { btn.innerHTML = 'Tap badge on reader now...'; btn.disabled = true; }
+
+        const writeRes = await fetch('http://127.0.0.1:8732/write', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: tokenData.login_token })
+        });
+        const writeData = await writeRes.json();
+        if (writeData.ok) {
+            alert('✅ Badge written successfully.');
+        } else {
+            alert('❌ ' + (writeData.error || 'Failed to write badge.'));
+        }
+    } catch (err) {
+        alert('❌ NFC Bridge not reachable. Make sure NfcBridge.exe is running on this PC (see nfc-bridge/ in the repo).');
+    } finally {
+        if (btn) { btn.innerHTML = originalHtml; btn.disabled = false; }
+    }
+}
+
+/**
  * Prints a single login card: the QR (login-card.png) plus the person's name/badge as plain
  * text next to it -- not baked into the PNG itself (see generateQrPngAtSize() in
  * scripts/lib/datamatrix.js), so this stays simple HTML rather than needing server-side text
@@ -3389,6 +3426,7 @@ function openEntityModal(type, id) {
                         <img src="/api/users/${entity.badge_id}/login-card.png" onclick="openImageModal('/api/users/${entity.badge_id}/login-card.png')" style="width:70px;height:70px;object-fit:contain;background:#fff;border-radius:4px;cursor:zoom-in;">
                         <div style="display:flex; flex-direction:column; gap:6px;">
                             <button class="btn btn-secondary" style="width:auto;" onclick="printUserLoginCard('${entity.badge_id}')">${icon('printer')} Print Card</button>
+                            <button class="btn btn-secondary" style="width:auto;" onclick="writeNfcBadge('${entity.badge_id}', this)">${icon('radio')} Write to NFC Badge</button>
                             <button class="btn btn-secondary" style="width:auto; font-size:11px;" onclick="issueUserLoginCard('${entity.badge_id}', true)">${icon('refresh-cw')} Reissue (invalidates old card)</button>
                         </div>
                     </div>
