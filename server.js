@@ -124,13 +124,6 @@ app.use(helmet({
             ...helmet.contentSecurityPolicy.getDefaultDirectives(),
             'script-src': ["'self'", "'unsafe-inline'"],
             'script-src-attr': ["'self'", "'unsafe-inline'"],
-            // Without an explicit connect-src, it falls back to default-src 'self' -- which
-            // silently blocks the admin panel's fetch() to the local NFC bridge (nfc-bridge/,
-            // http://127.0.0.1:8732) before the browser even attempts the network request. The
-            // bridge's own CORS/Private-Network-Access headers are irrelevant if CSP never lets
-            // the request leave in the first place; this is what was actually causing "NFC
-            // Bridge not reachable" even with the bridge genuinely running.
-            'connect-src': ["'self'", "http://127.0.0.1:8732"],
         },
     },
 }));
@@ -1912,12 +1905,14 @@ app.get('/api/users/me/login-token-value', requireRole(1), async (req, res) => {
     }
 });
 
-// Returns a user's raw login_token as JSON instead of rendering it into a QR -- the admin
-// panel's "Write to NFC Badge" button needs the literal value to hand to the local NFC bridge
-// running on the admin's own PC (see nfc-bridge/), which has no way to decode a QR image itself.
-// Same hierarchy protection as login-card.png immediately above, for the identical reason given
-// there: this value alone logs in as the person with no PIN, so reading it needs the same
-// protection as issuing it in the first place.
+// Returns a user's raw login_token as JSON instead of rendering it into a QR -- the standalone
+// ToolTracker NFC Tool (see nfc-bridge/) needs the literal value to write onto a physical tag,
+// which has no way to decode a QR image itself. That app is a native client of this same API
+// (it logs in exactly like the admin panel does), not anything running in a browser -- see
+// nfc-bridge/NfcTool.cs's own doc comment for why it's a standalone app rather than a web page
+// feature. Same hierarchy protection as login-card.png immediately above, for the identical
+// reason given there: this value alone logs in as the person with no PIN, so reading it needs
+// the same protection as issuing it in the first place.
 app.get('/api/users/:badge_id/login-token-value', requireRole(3), async (req, res) => {
     try {
         const result = await pool.query('SELECT role, login_token FROM users WHERE badge_id = $1', [req.params.badge_id]);
@@ -1930,18 +1925,17 @@ app.get('/api/users/:badge_id/login-token-value', requireRole(3), async (req, re
     }
 });
 
-// Serves the pre-built NFC Bridge helper program (see nfc-bridge/) so anyone who can reach a
-// "Write to NFC Badge" button -- which includes the self-service one on My Account, open to
-// every role same as the self-service QR login card -- can get a ready-to-run copy with one
-// click, no repo clone or C# compiler needed on their own PC. requireRole(1) rather than
-// matching the subordinate-write button's requireRole(3): the .exe itself has nothing sensitive
-// in it (see nfc-bridge/'s own doc comment on why it needs no auth of its own), so there's no
-// reason to gate the download tighter than the lower of the two features it supports. Never
-// committed to git (see .gitignore) -- it's a manual build-and-drop-in-place step on whichever
-// Windows machine built it (see nfc-bridge/README.md) whenever NfcBridge.cs changes.
+// Serves the pre-built standalone ToolTracker NFC Tool (see nfc-bridge/) -- linked from My
+// Account -- so anyone can get a ready-to-run copy with one click, no repo clone or C# compiler
+// needed on their own PC. requireRole(1): the app's own "My Badge" tab is self-service, open to
+// every role same as the self-service QR login card, and the .exe itself has nothing sensitive
+// in it (see nfc-bridge/NfcTool.cs's own doc comment on why it needs no auth of its own) --
+// everything it can do is still gated by the real API once it logs in. Never committed to git
+// (see .gitignore) -- it's a manual build-and-drop-in-place step on whichever Windows machine
+// built it (see nfc-bridge/README.md) whenever NfcTool.cs changes.
 app.get('/api/admin/nfc-bridge-download', requireRole(1), (req, res) => {
-    res.download(path.join(__dirname, 'nfc-bridge', 'NfcBridge.exe'), 'NfcBridge.exe', (err) => {
-        if (err && !res.headersSent) res.status(404).json({ error: 'The NFC Bridge has not been built on this server yet.' });
+    res.download(path.join(__dirname, 'nfc-bridge', 'NfcTool.exe'), 'NfcTool.exe', (err) => {
+        if (err && !res.headersSent) res.status(404).json({ error: 'The NFC Tool has not been built on this server yet.' });
     });
 });
 

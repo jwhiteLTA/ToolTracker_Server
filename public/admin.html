@@ -122,9 +122,12 @@
                     <div style="display:flex; gap:8px; flex-wrap:wrap;">
                         <button class="btn btn-secondary" style="width:auto;" onclick="issueMyLoginCard()"><span class="icon" data-icon="qr-code"></span> Generate / Reissue Card</button>
                         <button class="btn btn-secondary" style="width:auto; display:none;" id="btn-print-my-card" onclick="printMyLoginCard()"><span class="icon" data-icon="printer"></span> Print My Card</button>
-                        <button class="btn btn-secondary" style="width:auto; display:none;" id="btn-write-my-nfc" onclick="writeMyNfcBadge(this)"><span class="icon" data-icon="radio"></span> Write to NFC Badge</button>
                     </div>
-                    <a href="/api/admin/nfc-bridge-download" style="font-size:10px; color:var(--muted); display:inline-block; margin-top:8px;">Don't have the NFC Bridge tool yet? Download it</a>
+                    <!-- Writing a login card or tool barcode onto a physical NFC tag happens in a separate
+                         standalone desktop app (see nfc-bridge/README.md) rather than here -- a browser page
+                         can't talk to the USB reader directly. requireRole(1) on the download route, open to
+                         every role since the app's own "My Badge" tab is self-service same as this card. -->
+                    <a href="/api/admin/nfc-bridge-download" style="font-size:11px; color:var(--blue); display:inline-block; margin-top:10px;"><span class="icon" data-icon="radio"></span> Download the ToolTracker NFC Tool (writes login cards &amp; tool tags to physical NFC tags)</a>
                 </div>
             </div>
 

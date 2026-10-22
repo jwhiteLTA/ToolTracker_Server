@@ -3,7 +3,7 @@ node_modules/
 tool_labels/
 certs/
 caddy.exe
-nfc-bridge/NfcBridge.exe
+nfc-bridge/NfcTool.exe
 caddy-for-raspberry-pi/
 Caddyfile
 logs/

@@ -413,19 +413,16 @@ async function updateMyAccount() {
 function loadMyLoginCard() {
     const preview = document.getElementById('my-login-card-preview');
     const printBtn = document.getElementById('btn-print-my-card');
-    const nfcBtn = document.getElementById('btn-write-my-nfc');
     if (!preview) return;
     const probe = new Image();
     const src = `/api/users/me/login-card.png?t=${Date.now()}`; // cache-bust so a reissue is reflected immediately
     probe.onload = () => {
         preview.innerHTML = `<img src="${src}" style="width:120px;height:120px;object-fit:contain;background:#fff;border-radius:4px;">`;
         if (printBtn) printBtn.style.display = '';
-        if (nfcBtn) nfcBtn.style.display = '';
     };
     probe.onerror = () => {
         preview.innerHTML = `<span style="color:var(--muted); font-size:12px;">No login card generated yet.</span>`;
         if (printBtn) printBtn.style.display = 'none';
-        if (nfcBtn) nfcBtn.style.display = 'none';
     };
     probe.src = src;
 }
@@ -1085,77 +1082,6 @@ async function issueUserLoginCard(id, isReissue) {
     if (!res.ok) return alert('❌ Failed to generate login card.');
     await loadUsers();
     openEntityModal('user', id);
-}
-
-/**
- * Sends the person's existing login_token to the local NFC bridge (see nfc-bridge/ in the repo)
- * running on THIS admin's own PC, which writes it to a tag presented to the attached reader --
- * the same credential the QR login card already encodes, just on a tap-able badge instead of
- * printed paper. The token is fetched fresh via login-token-value rather than trusted from any
- * cached state, same reasoning as printUserLoginCard() pulling the PNG live. The three ways this
- * can fail (no card issued yet / bridge program not running on this PC / the write itself
- * failed, e.g. no tag presented in time) are reported distinctly so the admin knows which one to
- * fix instead of one generic error.
- */
-async function writeNfcBadge(badgeId, btn) {
-    const originalHtml = btn ? btn.innerHTML : null;
-    try {
-        const tokenRes = await fetch(`/api/users/${badgeId}/login-token-value`);
-        const tokenData = await tokenRes.json();
-        if (!tokenRes.ok) return alert('❌ ' + (tokenData.error || 'Failed to fetch login token.'));
-
-        if (btn) { btn.innerHTML = 'Tap badge on reader now...'; btn.disabled = true; }
-
-        const writeRes = await fetch('http://127.0.0.1:8732/write', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token: tokenData.login_token })
-        });
-        const writeData = await writeRes.json();
-        if (writeData.ok) {
-            alert('✅ Badge written successfully.');
-        } else {
-            alert('❌ ' + (writeData.error || 'Failed to write badge.'));
-        }
-    } catch (err) {
-        alert('❌ NFC Bridge not reachable. Make sure NfcBridge.exe is running on this PC -- download it from the link below the Write to NFC Badge button if you don\'t have it yet.');
-    } finally {
-        if (btn) { btn.innerHTML = originalHtml; btn.disabled = false; }
-    }
-}
-
-/**
- * Self-service counterpart to writeNfcBadge() -- same mechanics (fetch the raw token, hand it to
- * the local NFC bridge, report exactly what went wrong), but against the /me/ endpoint rather
- * than a subordinate's, for the same reason loadMyLoginCard() exists separately from the
- * subordinate entity card's version: nothing outranks a super_admin, so the hierarchy-gated
- * route would 403 even them trying to fetch their own token.
- */
-async function writeMyNfcBadge(btn) {
-    const originalHtml = btn ? btn.innerHTML : null;
-    try {
-        const tokenRes = await fetch('/api/users/me/login-token-value');
-        const tokenData = await tokenRes.json();
-        if (!tokenRes.ok) return alert('❌ ' + (tokenData.error || 'Failed to fetch login token.'));
-
-        if (btn) { btn.innerHTML = 'Tap badge on reader now...'; btn.disabled = true; }
-
-        const writeRes = await fetch('http://127.0.0.1:8732/write', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token: tokenData.login_token })
-        });
-        const writeData = await writeRes.json();
-        if (writeData.ok) {
-            alert('✅ Badge written successfully.');
-        } else {
-            alert('❌ ' + (writeData.error || 'Failed to write badge.'));
-        }
-    } catch (err) {
-        alert('❌ NFC Bridge not reachable. Make sure NfcBridge.exe is running on this PC -- download it from the link below if you don\'t have it yet.');
-    } finally {
-        if (btn) { btn.innerHTML = originalHtml; btn.disabled = false; }
-    }
 }
 
 /**
@@ -3477,8 +3403,6 @@ function openEntityModal(type, id) {
                         <img src="/api/users/${entity.badge_id}/login-card.png" onclick="openImageModal('/api/users/${entity.badge_id}/login-card.png')" style="width:70px;height:70px;object-fit:contain;background:#fff;border-radius:4px;cursor:zoom-in;">
                         <div style="display:flex; flex-direction:column; gap:6px;">
                             <button class="btn btn-secondary" style="width:auto;" onclick="printUserLoginCard('${entity.badge_id}')">${icon('printer')} Print Card</button>
-                            <button class="btn btn-secondary" style="width:auto;" onclick="writeNfcBadge('${entity.badge_id}', this)">${icon('radio')} Write to NFC Badge</button>
-                            <a href="/api/admin/nfc-bridge-download" style="font-size:10px; color:var(--muted);">Don't have the NFC Bridge tool yet? Download it</a>
                             <button class="btn btn-secondary" style="width:auto; font-size:11px;" onclick="issueUserLoginCard('${entity.badge_id}', true)">${icon('refresh-cw')} Reissue (invalidates old card)</button>
                         </div>
                     </div>
