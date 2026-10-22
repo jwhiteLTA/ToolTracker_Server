@@ -1906,6 +1906,18 @@ app.get('/api/users/:badge_id/login-token-value', requireRole(3), async (req, re
     }
 });
 
+// Serves the pre-built NFC Bridge helper program (see nfc-bridge/) so any dept_admin+ can get a
+// ready-to-run copy with one click -- no repo clone, no C# compiler needed on their own PC. Same
+// requireRole(3) as the "Write to NFC Badge" button this exists to support, since there's no
+// reason to hand it out more broadly than that feature already is. The .exe itself is never
+// committed to git (see .gitignore) -- it's a manual build-and-drop-in-place step on whichever
+// Windows machine built it (see nfc-bridge/README.md) whenever NfcBridge.cs changes.
+app.get('/api/admin/nfc-bridge-download', requireRole(3), (req, res) => {
+    res.download(path.join(__dirname, 'nfc-bridge', 'NfcBridge.exe'), 'NfcBridge.exe', (err) => {
+        if (err && !res.headersSent) res.status(404).json({ error: 'The NFC Bridge has not been built on this server yet.' });
+    });
+});
+
 // Deactivate a user account. Requester must outrank the target user (getRoleWeight hierarchy check).
 app.put('/api/users/:badge_id/deactivate', requireFetchHeader, requireRole(1), async (req, res) => {
     const { badge_id } = req.params;

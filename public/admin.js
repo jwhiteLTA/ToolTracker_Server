@@ -1115,7 +1115,7 @@ async function writeNfcBadge(badgeId, btn) {
             alert('❌ ' + (writeData.error || 'Failed to write badge.'));
         }
     } catch (err) {
-        alert('❌ NFC Bridge not reachable. Make sure NfcBridge.exe is running on this PC (see nfc-bridge/ in the repo).');
+        alert('❌ NFC Bridge not reachable. Make sure NfcBridge.exe is running on this PC -- download it from the link below the Write to NFC Badge button if you don\'t have it yet.');
     } finally {
         if (btn) { btn.innerHTML = originalHtml; btn.disabled = false; }
     }
@@ -3441,6 +3441,7 @@ function openEntityModal(type, id) {
                         <div style="display:flex; flex-direction:column; gap:6px;">
                             <button class="btn btn-secondary" style="width:auto;" onclick="printUserLoginCard('${entity.badge_id}')">${icon('printer')} Print Card</button>
                             <button class="btn btn-secondary" style="width:auto;" onclick="writeNfcBadge('${entity.badge_id}', this)">${icon('radio')} Write to NFC Badge</button>
+                            <a href="/api/admin/nfc-bridge-download" style="font-size:10px; color:var(--muted);">Don't have the NFC Bridge tool yet? Download it</a>
                             <button class="btn btn-secondary" style="width:auto; font-size:11px;" onclick="issueUserLoginCard('${entity.badge_id}', true)">${icon('refresh-cw')} Reissue (invalidates old card)</button>
                         </div>
                     </div>
