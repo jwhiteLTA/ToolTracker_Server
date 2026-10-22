@@ -32,6 +32,12 @@ static class Program
     [STAThread]
     static void Main()
     {
+        // Without this, HttpClient's TLS handshake against a modern HTTPS server can fail
+        // outright on older .NET Framework configurations, which don't all enable TLS 1.2 by
+        // default -- surfacing only as HttpClient's generic "An error occurred while sending
+        // the request", with the real cause buried in an inner exception never shown anywhere.
+        ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         Application.Run(new LoginForm());
@@ -159,9 +165,19 @@ class LoginForm : Form
         catch (Exception ex)
         {
             statusLabel.ForeColor = Color.Firebrick;
-            statusLabel.Text = "Connection error: " + ex.Message;
+            statusLabel.Text = "Connection error: " + Describe(ex);
             loginBtn.Enabled = true;
         }
+    }
+
+    /// <summary>HttpClient wraps the real cause in a generic "An error occurred while sending
+    /// the request" HttpRequestException -- the actually useful message (TLS failure, DNS
+    /// failure, connection refused, etc.) is on .InnerException, sometimes nested further.
+    /// Walks to the deepest one so the status label shows something a person can act on.</summary>
+    internal static string Describe(Exception ex)
+    {
+        while (ex.InnerException != null) ex = ex.InnerException;
+        return ex.Message;
     }
 }
 
@@ -335,7 +351,7 @@ class MainForm : Form
         catch (Exception ex)
         {
             statusLabel.ForeColor = Color.Firebrick;
-            statusLabel.Text = ex.Message;
+            statusLabel.Text = LoginForm.Describe(ex);
         }
         finally
         {
@@ -352,7 +368,7 @@ class MainForm : Form
             allUsers = ((object[])json["users"]).Select(o => (Dictionary<string, object>)o).ToList();
             FilterUserList();
         }
-        catch (Exception ex) { userStatusLabel.Text = "Failed to load users: " + ex.Message; }
+        catch (Exception ex) { userStatusLabel.Text = "Failed to load users: " + LoginForm.Describe(ex); }
     }
 
     void FilterUserList()
@@ -381,7 +397,7 @@ class MainForm : Form
             allTools = ((object[])json["tools"]).Select(o => (Dictionary<string, object>)o).ToList();
             FilterToolList();
         }
-        catch (Exception ex) { toolStatusLabel.Text = "Failed to load tools: " + ex.Message; }
+        catch (Exception ex) { toolStatusLabel.Text = "Failed to load tools: " + LoginForm.Describe(ex); }
     }
 
     void FilterToolList()
