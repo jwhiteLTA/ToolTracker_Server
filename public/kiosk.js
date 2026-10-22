@@ -4,6 +4,11 @@
 let activeUser = null;
 let pendingMode = null; // 'OUT', 'IN', 'REPORT', 'AUDIT', or 'TRANSFERS'
 let batchQueue = [];
+// True once setupActionScreen() has actually shown #panel-scanner for the current OUT session --
+// lets confirmCheckoutSetup() tell "first time through #panel-checkout-setup after auth" (full
+// setupActionScreen(), which is safe to wipe batchQueue since it's still empty) apart from
+// "returning from an in-session Edit" (must NOT wipe the queue -- see editCheckoutSetup()).
+let checkoutScanningStarted = false;
 let html5QrScannerInstance = null;
 // Tool name lookup by qr_code, for showing "CUT-0001 -- Wire Cutter" in the checkout/check-in
 // queue instead of just the bare code -- see loadKioskToolNames()/renderQueue().
@@ -136,6 +141,7 @@ function resetToIdle() {
     auditQueueTotal = 0;
     auditSelectedBoxIds = new Set();
     auditBoxStatusById = new Map();
+    checkoutScanningStarted = false;
     const auditProgressEl = document.getElementById('audit-queue-progress');
     if (auditProgressEl) auditProgressEl.textContent = '';
 
@@ -246,8 +252,85 @@ function completeKioskAuth(user, credential) {
     document.getElementById('screen-auth').style.display = 'none';
     document.getElementById('screen-action').style.display = 'flex';
 
-    setupActionScreen();
+    if (pendingMode === 'OUT') {
+        // Fresh session -- clear any stale values before the operator ever sees this screen
+        // (showCheckoutSetupScreen() itself doesn't clear, since editCheckoutSetup() also uses
+        // it and needs the current values preserved there instead).
+        document.getElementById('kiosk-work-order').value = '';
+        document.getElementById('kiosk-location').value = '';
+        showCheckoutSetupScreen();
+    } else {
+        setupActionScreen();
+    }
     loadKioskAuditStatus();
+}
+
+/**
+ * Shows the checkout-only #panel-checkout-setup (Work Order/Location), hiding every other
+ * sub-panel. Used both right after auth for a fresh OUT session (completeKioskAuth(), which
+ * clears the fields first) and from editCheckoutSetup() mid-session (which deliberately leaves
+ * them as-is) -- this function itself never touches the field values, only visibility/focus.
+ */
+function showCheckoutSetupScreen() {
+    document.getElementById('panel-scanner').style.display = 'none';
+    document.getElementById('panel-report').style.display = 'none';
+    document.getElementById('panel-audit').style.display = 'none';
+    document.getElementById('panel-transfers').style.display = 'none';
+    document.getElementById('panel-checkout-setup').style.display = 'block';
+    document.getElementById('kiosk-work-order').focus();
+}
+
+/** "Skip" on #panel-checkout-setup -- clears both fields (in case Edit brought the operator back here with something already typed) then proceeds exactly like Continue. */
+function skipCheckoutSetup() {
+    document.getElementById('kiosk-work-order').value = '';
+    document.getElementById('kiosk-location').value = '';
+    confirmCheckoutSetup();
+}
+
+/**
+ * "Continue" on #panel-checkout-setup, and also the shared landing point skipCheckoutSetup()
+ * funnels into. Branches on checkoutScanningStarted to tell first-entry (this OUT session's
+ * batchQueue is still empty, so the full setupActionScreen() reset is harmless and also does
+ * the rest of the one-time scan-panel setup: title, button label, loadKioskToolNames(), focus)
+ * apart from returning from an in-session Edit (batchQueue may already have scanned items --
+ * setupActionScreen() would wipe it, so just restore the scanner panel directly instead).
+ */
+function confirmCheckoutSetup() {
+    document.getElementById('panel-checkout-setup').style.display = 'none';
+    if (checkoutScanningStarted) {
+        document.getElementById('panel-scanner').style.display = 'block';
+        updateCheckoutSetupSummary();
+        focusScanInput('kiosk-scan-input');
+    } else {
+        setupActionScreen();
+    }
+}
+
+/** The summary row's "Edit" button -- reopens #panel-checkout-setup with the current values intact (unlike the fresh-session path, nothing here is cleared) and batchQueue untouched, so scanning already in progress picks up right where it left off once confirmCheckoutSetup() returns. */
+function editCheckoutSetup() {
+    showCheckoutSetupScreen();
+}
+
+/**
+ * Renders #kiosk-wo-summary on #panel-scanner from the current Work Order/Location values --
+ * always visible for OUT mode (even when both are empty, as "no work order or location set")
+ * so there's always a way back into #panel-checkout-setup, never a dead end for someone who
+ * skipped but changes their mind mid-scan. Hidden entirely for check-in, which has no such
+ * concept. Called once by setupActionScreen() (first entry) and again by confirmCheckoutSetup()
+ * (returning from an in-session Edit).
+ */
+function updateCheckoutSetupSummary() {
+    const summaryEl = document.getElementById('kiosk-wo-summary');
+    if (!summaryEl) return;
+    if (pendingMode !== 'OUT') { summaryEl.style.display = 'none'; return; }
+
+    const wo = document.getElementById('kiosk-work-order').value.trim();
+    const loc = document.getElementById('kiosk-location').value.trim();
+    const parts = [];
+    if (wo) parts.push(`Work Order: ${wo}`);
+    if (loc) parts.push(`Location: ${loc}`);
+    document.getElementById('kiosk-wo-summary-text').textContent = parts.length ? parts.join(' · ') : 'No work order or location set';
+    summaryEl.style.display = 'flex';
 }
 
 /**
@@ -347,6 +430,7 @@ function setupActionScreen() {
     if (auditProgressEl) auditProgressEl.textContent = '';
     renderQueue();
 
+    document.getElementById('panel-checkout-setup').style.display = 'none';
     document.getElementById('panel-scanner').style.display = 'none';
     document.getElementById('panel-report').style.display = 'none';
     document.getElementById('panel-audit').style.display = 'none';
@@ -377,9 +461,8 @@ function setupActionScreen() {
         const submitBtn = document.getElementById('btn-submit-action');
         submitBtn.textContent = pendingMode === 'OUT' ? '✓ Complete Checkout' : '✓ Complete Check-in';
         submitBtn.disabled = false;
-        document.getElementById('kiosk-work-order-group').style.display = pendingMode === 'OUT' ? 'flex' : 'none';
-        document.getElementById('kiosk-work-order').value = '';
-        document.getElementById('kiosk-location').value = '';
+        checkoutScanningStarted = true;
+        updateCheckoutSetupSummary();
         // Reset to expanded every fresh entry into check-in -- loadKioskToolNames() (called
         // below) does the actual fetch+render once pendingMode is confirmed 'IN'.
         document.getElementById('checkin-out-tools-section').style.display = pendingMode === 'IN' ? 'block' : 'none';
