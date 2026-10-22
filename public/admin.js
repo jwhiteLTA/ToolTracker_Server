@@ -96,6 +96,30 @@ function oneYearFromDate(dateStr) {
 }
 
 /**
+ * Computes each tool's reading-order item number (1, 2, 3... per drawer, top-to-bottom then
+ * left-to-right) across an arbitrary set of tools spanning multiple drawers/departments -- the
+ * same sort openToolboxPrintSheet()'s map badges/Tool List numbering already uses, and
+ * kiosk.js's own loadKioskToolNames(), so a number shown anywhere always matches what the
+ * printed sheet and kiosk checkout queue show for that same tool. Tools with no saved position
+ * (not yet placed on a drawer map) are simply absent from the returned map -- callers show a
+ * placeholder rather than a fabricated number for those. Used by openToolCardsPrintSheet() and
+ * the Calibrated Tools table.
+ */
+function computeItemNumbersByToolId(tools) {
+    const itemNumberByToolId = {};
+    const byDrawer = {};
+    tools.forEach(t => {
+        if (t.position_x === null || t.position_y === null || t.drawer_id === null) return;
+        (byDrawer[t.drawer_id] = byDrawer[t.drawer_id] || []).push(t);
+    });
+    Object.values(byDrawer).forEach(drawerTools => {
+        drawerTools.sort((a, b) => a.position_y - b.position_y || a.position_x - b.position_x);
+        drawerTools.forEach((t, i) => { itemNumberByToolId[t.tool_id] = i + 1; });
+    });
+    return itemNumberByToolId;
+}
+
+/**
  * Toggles the universal entity modal (#entity-modal-overlay) between its read-only view
  * and its edit view. isEditing=false (the default when the modal opens) shows #em-read-fields
  * and the "Edit Details" button; isEditing=true shows #em-edit-fields and the "Save Changes"
@@ -833,19 +857,9 @@ async function openToolCardsPrintSheet(boxId) {
         .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
     if (!tools.length) return alert('This toolbox has no tools to make cards for.');
 
-    // Position numbers: group by drawer and rank each drawer's own positioned tools in reading
-    // order (top-to-bottom, left-to-right) -- the exact same sort openToolboxPrintSheet() above
-    // uses for its map badges/Tool List numbering, so a card's number always matches that sheet.
-    const itemNumberByToolId = {};
-    const byDrawer = {};
-    tools.forEach(t => {
-        if (t.position_x === null || t.position_y === null) return;
-        (byDrawer[t.drawer_id] = byDrawer[t.drawer_id] || []).push(t);
-    });
-    Object.values(byDrawer).forEach(drawerTools => {
-        drawerTools.sort((a, b) => a.position_y - b.position_y || a.position_x - b.position_x);
-        drawerTools.forEach((t, i) => { itemNumberByToolId[t.tool_id] = i + 1; });
-    });
+    // Position numbers -- the same sort openToolboxPrintSheet() above uses for its map
+    // badges/Tool List numbering, so a card's number always matches that sheet.
+    const itemNumberByToolId = computeItemNumbersByToolId(tools);
 
     // Preload every photo so its real pixel dimensions are known before building the card HTML --
     // see this function's own doc comment for why orientation (not just "loaded yet") matters.
@@ -5604,9 +5618,13 @@ function renderCalibratedToolsTable() {
     const rows = globalToolsCache
         .filter(t => t.is_calibrated && t.status !== 'Retired')
         .sort((a, b) => compareCalibratedTools(a, b, calSortKey));
+    // Computed across ALL calibrated tools, not just `rows` after filtering -- a tool's item
+    // number depends on its drawer-mates regardless of which of them happen to be calibrated,
+    // so this must match the full tree's own numbering, not a renumbering of just this subset.
+    const itemNumberByToolId = computeItemNumbersByToolId(globalToolsCache);
 
     tbody.innerHTML = rows.length
-        ? rows.map(renderCalibratedToolRow).join('')
+        ? rows.map(t => renderCalibratedToolRow(t, itemNumberByToolId)).join('')
         : `<tr><td colspan="9" style="text-align:center; color:var(--muted);">No calibrated tools yet.</td></tr>`;
 
     document.querySelectorAll('#ws-calibrated-tools .sortable-th').forEach(th => {
@@ -5646,9 +5664,14 @@ function onCalibratedToolsBodyClick(event) {
  * callers). Using === here would silently never match, leaving edit mode permanently "stuck
  * closed" with no visible error.
  */
-function renderCalibratedToolRow(tool) {
+function renderCalibratedToolRow(tool, itemNumberByToolId) {
     const statusColor = tool.status === 'In' ? 'var(--green)' : (tool.status === 'Out' ? 'var(--accent)' : 'var(--red)');
-    const location = [tool.toolbox_name, tool.drawer_name].filter(Boolean).join(' → '); // same &rarr; separator the trace-investigation detail view already uses
+    const itemNum = itemNumberByToolId[tool.tool_id];
+    // Same &rarr; separator the trace-investigation detail view already uses; the item number
+    // (matching the toolbox map's own numbering -- see computeItemNumbersByToolId()) is folded
+    // into this same location line, not a separate column, since it's meaningless without the
+    // box/drawer it's scoped to.
+    const location = [tool.toolbox_name, tool.drawer_name, itemNum ? `Item ${itemNum}` : null].filter(Boolean).join(' → ');
     const isEditing = tool.tool_id == calEditingToolId;
 
     const nameCell = `<span style="cursor:pointer; font-weight:bold;" onclick="openEntityModal('tool', '${tool.qr_code}')">${tool.name}</span><br><span style="font-family:monospace; font-size:10px; color:var(--muted);">${tool.qr_code}</span>`;
@@ -5656,20 +5679,25 @@ function renderCalibratedToolRow(tool) {
     const statusCell = `<span style="font-size:10px; font-weight:bold; padding:2px 6px; border-radius:4px; background:rgba(255,255,255,0.05); color:${statusColor};">${tool.status}</span>`;
     const calCell = calibrationStatusHtml(tool);
 
+    // Edit-mode inputs get an explicit width instead of .form-input's default 100% -- in an
+    // auto-layout table, a 100%-wide input has nothing to be 100% OF yet, so the browser sizes
+    // the column to the input's own unconstrained default (much wider than these short values
+    // ever need). Across four columns that added up to enough extra table width to push the
+    // Save/Cancel buttons past the .table-responsive-wrapper's visible edge, clipping Cancel.
     const serialCell = isEditing
-        ? `<input class="form-input" style="padding:6px 8px; font-size:13px; text-transform:uppercase;" id="cal-edit-serial-${tool.tool_id}" value="${escapeHtmlAttr(tool.serial_number || '')}" oninput="uppercaseInput(this)">`
+        ? `<input class="form-input" style="width:110px; padding:6px 8px; font-size:13px; text-transform:uppercase;" id="cal-edit-serial-${tool.tool_id}" value="${escapeHtmlAttr(tool.serial_number || '')}" oninput="uppercaseInput(this)">`
         : (tool.serial_number ? `<span style="font-family:monospace;">${tool.serial_number}</span>` : `<span style="color:var(--muted); font-style:italic;">--</span>`);
     const calIdCell = isEditing
-        ? `<input class="form-input" style="padding:6px 8px; font-size:13px; text-transform:uppercase;" id="cal-edit-calid-${tool.tool_id}" value="${escapeHtmlAttr(tool.cal_id || '')}" oninput="uppercaseInput(this)">`
+        ? `<input class="form-input" style="width:110px; padding:6px 8px; font-size:13px; text-transform:uppercase;" id="cal-edit-calid-${tool.tool_id}" value="${escapeHtmlAttr(tool.cal_id || '')}" oninput="uppercaseInput(this)">`
         : (tool.cal_id ? `<span style="font-family:monospace;">${tool.cal_id}</span>` : `<span style="color:var(--muted); font-style:italic;">--</span>`);
 
     const lastCalVal = tool.last_cal_date ? tool.last_cal_date.split('T')[0] : '';
     const dueCalVal = tool.cal_due_date ? tool.cal_due_date.split('T')[0] : '';
     const lastCalCell = isEditing
-        ? `<input type="date" class="form-input" style="padding:6px 8px; font-size:13px;" id="cal-edit-lastcal-${tool.tool_id}" value="${lastCalVal}" onchange="document.getElementById('cal-edit-caldue-${tool.tool_id}').value = oneYearFromDate(this.value)">`
+        ? `<input type="date" class="form-input" style="width:140px; padding:6px 8px; font-size:13px;" id="cal-edit-lastcal-${tool.tool_id}" value="${lastCalVal}" onchange="document.getElementById('cal-edit-caldue-${tool.tool_id}').value = oneYearFromDate(this.value)">`
         : (lastCalVal || '--');
     const dueCalCell = isEditing
-        ? `<input type="date" class="form-input" style="padding:6px 8px; font-size:13px;" id="cal-edit-caldue-${tool.tool_id}" value="${dueCalVal}">`
+        ? `<input type="date" class="form-input" style="width:140px; padding:6px 8px; font-size:13px;" id="cal-edit-caldue-${tool.tool_id}" value="${dueCalVal}">`
         : (dueCalVal || '--');
 
     const actionsCell = isEditing

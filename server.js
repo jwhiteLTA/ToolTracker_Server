@@ -3055,10 +3055,6 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
     const part_number = normalizeCode(req.body.part_number);
     const cal_id = normalizeCode(req.body.cal_id);
 
-    // If they checked the box but didn't provide a due date, throw an error
-    if (is_calibrated && !cal_due_date) {
-        return res.status(400).json({ error: 'Calibration Due Date is required.' });
-    }
     if (!drawer_id) {
         return res.status(400).json({ error: 'A drawer/location is required.' });
     }
@@ -3073,11 +3069,23 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
         // param name. Resolving to the real tool_id up front (rather than trying to use the
         // qr_code text directly in a WHERE tool_id = ... comparison) is what was missing:
         // that mismatch made every save throw "invalid input syntax for type integer".
-        const currentRes = await client.query('SELECT tool_id, status, name FROM tools WHERE qr_code = $1', [req.params.id]);
+        const currentRes = await client.query('SELECT tool_id, status, name, is_calibrated, cal_due_date FROM tools WHERE qr_code = $1', [req.params.id]);
         if (currentRes.rows.length === 0) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Tool not found.' }); }
         const toolId = currentRes.rows[0].tool_id;
         const previousStatus = currentRes.rows[0].status;
         const previousName = currentRes.rows[0].name;
+
+        // Only block on a missing due date when this save is what's newly creating the gap --
+        // i.e. a tool that wasn't flagged "Requires Calibration" before now is, with no due date
+        // given. A tool that already lacked one (common right after a bulk import, before every
+        // tool's first real calibration is logged) can still have its other fields -- Cal ID,
+        // Serial Number -- edited and saved without being forced to backfill the due date in the
+        // same action; that gap already existed and this save isn't the one introducing it.
+        const wasAlreadyCalibratedWithoutDueDate = currentRes.rows[0].is_calibrated && !currentRes.rows[0].cal_due_date;
+        if (is_calibrated && !cal_due_date && !wasAlreadyCalibratedWithoutDueDate) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'Calibration Due Date is required.' });
+        }
 
         // An edit can both read and (via the Location cascade below) WRITE to a different
         // department than the tool's current one -- insufficient weight in either the tool's
