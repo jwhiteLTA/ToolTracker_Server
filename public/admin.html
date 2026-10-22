@@ -122,7 +122,9 @@
                     <div style="display:flex; gap:8px; flex-wrap:wrap;">
                         <button class="btn btn-secondary" style="width:auto;" onclick="issueMyLoginCard()"><span class="icon" data-icon="qr-code"></span> Generate / Reissue Card</button>
                         <button class="btn btn-secondary" style="width:auto; display:none;" id="btn-print-my-card" onclick="printMyLoginCard()"><span class="icon" data-icon="printer"></span> Print My Card</button>
+                        <button class="btn btn-secondary" style="width:auto; display:none;" id="btn-write-my-nfc" onclick="writeMyNfcBadge(this)"><span class="icon" data-icon="radio"></span> Write to NFC Badge</button>
                     </div>
+                    <a href="/api/admin/nfc-bridge-download" style="font-size:10px; color:var(--muted); display:inline-block; margin-top:8px;">Don't have the NFC Bridge tool yet? Download it</a>
                 </div>
             </div>
 

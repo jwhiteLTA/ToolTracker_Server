@@ -1888,6 +1888,23 @@ app.get('/api/users/:badge_id/login-card.png', requireRole(3), async (req, res) 
     }
 });
 
+// Self-service counterpart to login-token-value below, same reasoning as login-card.png's own
+// /me variant above: no hierarchy check needed since req.authUser.badge_id is the verified
+// session identity, not a client-supplied one -- which also sidesteps a real gap the hierarchy-
+// gated route below has for every account (nothing outranks a super_admin, so that route would
+// 403 even a super_admin trying to fetch their own token). MUST be registered before GET
+// /api/users/:badge_id/login-token-value for the same route-ordering reason as every other
+// me-vs-:badge_id pair in this file.
+app.get('/api/users/me/login-token-value', requireRole(1), async (req, res) => {
+    try {
+        const result = await pool.query('SELECT login_token FROM users WHERE badge_id = $1', [req.authUser.badge_id]);
+        if (!result.rows[0]?.login_token) return res.status(404).json({ error: 'No login card issued yet.' });
+        res.json({ login_token: result.rows[0].login_token });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch login token.' });
+    }
+});
+
 // Returns a user's raw login_token as JSON instead of rendering it into a QR -- the admin
 // panel's "Write to NFC Badge" button needs the literal value to hand to the local NFC bridge
 // running on the admin's own PC (see nfc-bridge/), which has no way to decode a QR image itself.
@@ -1906,13 +1923,16 @@ app.get('/api/users/:badge_id/login-token-value', requireRole(3), async (req, re
     }
 });
 
-// Serves the pre-built NFC Bridge helper program (see nfc-bridge/) so any dept_admin+ can get a
-// ready-to-run copy with one click -- no repo clone, no C# compiler needed on their own PC. Same
-// requireRole(3) as the "Write to NFC Badge" button this exists to support, since there's no
-// reason to hand it out more broadly than that feature already is. The .exe itself is never
+// Serves the pre-built NFC Bridge helper program (see nfc-bridge/) so anyone who can reach a
+// "Write to NFC Badge" button -- which includes the self-service one on My Account, open to
+// every role same as the self-service QR login card -- can get a ready-to-run copy with one
+// click, no repo clone or C# compiler needed on their own PC. requireRole(1) rather than
+// matching the subordinate-write button's requireRole(3): the .exe itself has nothing sensitive
+// in it (see nfc-bridge/'s own doc comment on why it needs no auth of its own), so there's no
+// reason to gate the download tighter than the lower of the two features it supports. Never
 // committed to git (see .gitignore) -- it's a manual build-and-drop-in-place step on whichever
 // Windows machine built it (see nfc-bridge/README.md) whenever NfcBridge.cs changes.
-app.get('/api/admin/nfc-bridge-download', requireRole(3), (req, res) => {
+app.get('/api/admin/nfc-bridge-download', requireRole(1), (req, res) => {
     res.download(path.join(__dirname, 'nfc-bridge', 'NfcBridge.exe'), 'NfcBridge.exe', (err) => {
         if (err && !res.headersSent) res.status(404).json({ error: 'The NFC Bridge has not been built on this server yet.' });
     });

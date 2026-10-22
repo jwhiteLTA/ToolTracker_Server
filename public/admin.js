@@ -413,16 +413,19 @@ async function updateMyAccount() {
 function loadMyLoginCard() {
     const preview = document.getElementById('my-login-card-preview');
     const printBtn = document.getElementById('btn-print-my-card');
+    const nfcBtn = document.getElementById('btn-write-my-nfc');
     if (!preview) return;
     const probe = new Image();
     const src = `/api/users/me/login-card.png?t=${Date.now()}`; // cache-bust so a reissue is reflected immediately
     probe.onload = () => {
         preview.innerHTML = `<img src="${src}" style="width:120px;height:120px;object-fit:contain;background:#fff;border-radius:4px;">`;
         if (printBtn) printBtn.style.display = '';
+        if (nfcBtn) nfcBtn.style.display = '';
     };
     probe.onerror = () => {
         preview.innerHTML = `<span style="color:var(--muted); font-size:12px;">No login card generated yet.</span>`;
         if (printBtn) printBtn.style.display = 'none';
+        if (nfcBtn) nfcBtn.style.display = 'none';
     };
     probe.src = src;
 }
@@ -1116,6 +1119,40 @@ async function writeNfcBadge(badgeId, btn) {
         }
     } catch (err) {
         alert('❌ NFC Bridge not reachable. Make sure NfcBridge.exe is running on this PC -- download it from the link below the Write to NFC Badge button if you don\'t have it yet.');
+    } finally {
+        if (btn) { btn.innerHTML = originalHtml; btn.disabled = false; }
+    }
+}
+
+/**
+ * Self-service counterpart to writeNfcBadge() -- same mechanics (fetch the raw token, hand it to
+ * the local NFC bridge, report exactly what went wrong), but against the /me/ endpoint rather
+ * than a subordinate's, for the same reason loadMyLoginCard() exists separately from the
+ * subordinate entity card's version: nothing outranks a super_admin, so the hierarchy-gated
+ * route would 403 even them trying to fetch their own token.
+ */
+async function writeMyNfcBadge(btn) {
+    const originalHtml = btn ? btn.innerHTML : null;
+    try {
+        const tokenRes = await fetch('/api/users/me/login-token-value');
+        const tokenData = await tokenRes.json();
+        if (!tokenRes.ok) return alert('❌ ' + (tokenData.error || 'Failed to fetch login token.'));
+
+        if (btn) { btn.innerHTML = 'Tap badge on reader now...'; btn.disabled = true; }
+
+        const writeRes = await fetch('http://127.0.0.1:8732/write', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: tokenData.login_token })
+        });
+        const writeData = await writeRes.json();
+        if (writeData.ok) {
+            alert('✅ Badge written successfully.');
+        } else {
+            alert('❌ ' + (writeData.error || 'Failed to write badge.'));
+        }
+    } catch (err) {
+        alert('❌ NFC Bridge not reachable. Make sure NfcBridge.exe is running on this PC -- download it from the link below if you don\'t have it yet.');
     } finally {
         if (btn) { btn.innerHTML = originalHtml; btn.disabled = false; }
     }
