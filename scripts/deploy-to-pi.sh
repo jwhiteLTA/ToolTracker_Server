@@ -8,12 +8,18 @@
 # anything else that needs the process restarted to pick up).
 #
 # Usage: ./scripts/deploy-to-pi.sh
-# Assumes: commits are already made locally, the Pi is reachable at tooltracker.local, and
-# your SSH key is already authorized on the Pi (see README's Raspberry Pi Migration section).
+# Assumes: commits are already made locally, your SSH key is already authorized on the Pi (see
+# README's Raspberry Pi Migration section), and the Pi is reachable either at tooltracker.local
+# (mDNS, shop LAN only) or tooltracker-pi (Tailscale MagicDNS, works from anywhere Tailscale is
+# connected, e.g. a laptop off the shop network) -- whichever resolves first is used.
 
 set -e
 
-PI_HOST="tooltracker@tooltracker.local"
+if timeout 2 bash -c ": < /dev/tcp/tooltracker.local/22" 2>/dev/null; then
+    PI_HOST="tooltracker@tooltracker.local"
+else
+    PI_HOST="tooltracker@tooltracker-pi"
+fi
 PI_DIR="~/ToolTracker_Server"
 
 echo "==> Pushing to GitHub..."
