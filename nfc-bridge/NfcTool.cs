@@ -329,14 +329,35 @@ class MainForm : Form
 
     async Task DoWrite(Func<Task<string>> getValue, Button btn, Label statusLabel, string label)
     {
+        string originalBtnText = btn.Text;
         btn.Enabled = false;
         statusLabel.ForeColor = Color.DimGray;
         statusLabel.Text = "Fetching...";
+
+        // A one-time label change is easy to miss if attention is on the button just clicked
+        // rather than the text below it -- a live, ticking countdown is not. This timer is
+        // purely cosmetic (NfcWriter.WriteValue has its own real 20-second wait inside
+        // Task.Run below); it just keeps both the button and the label visibly counting down
+        // in step with it so there's no mistaking whether the app is doing anything.
+        int secondsLeft = 20;
+        var countdownTimer = new Timer { Interval = 1000 };
+        countdownTimer.Tick += (s, e) => {
+            secondsLeft = Math.Max(0, secondsLeft - 1);
+            statusLabel.Text = "Waiting for a tag... " + secondsLeft + "s";
+            btn.Text = "Waiting... " + secondsLeft + "s";
+        };
+
         try
         {
             string value = await getValue();
-            statusLabel.Text = "Tap the tag on the reader now (up to 20 seconds)...";
+
+            statusLabel.ForeColor = Color.DarkOrange;
+            statusLabel.Text = "Waiting for a tag... " + secondsLeft + "s";
+            btn.Text = "Waiting... " + secondsLeft + "s";
+            countdownTimer.Start();
+
             var result = await Task.Run(() => NfcWriter.WriteValue(value));
+
             if (result.Ok)
             {
                 statusLabel.ForeColor = Color.SeaGreen;
@@ -355,6 +376,9 @@ class MainForm : Form
         }
         finally
         {
+            countdownTimer.Stop();
+            countdownTimer.Dispose();
+            btn.Text = originalBtnText;
             btn.Enabled = true;
         }
     }
